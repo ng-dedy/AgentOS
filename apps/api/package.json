@@ -8,7 +8,8 @@
     "start": "tsx --env-file-if-exists=../../.env src/server.ts",
     "seed": "tsx --env-file-if-exists=../../.env src/seed.ts",
     "typecheck": "tsc -p tsconfig.json",
-    "test": "vitest run"
+    "test": "vitest run",
+    "credentials:rotate": "tsx --env-file-if-exists=../../.env src/scripts/rotateCredentials.ts"
   },
   "dependencies": {
     "@agentos/contracts": "workspace:*",

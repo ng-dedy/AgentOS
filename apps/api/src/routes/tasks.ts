@@ -283,6 +283,9 @@ export async function taskRoutes(app: FastifyInstance, deps: AppDeps) {
       agents,
       tasks: {
         active: (counts.running ?? 0) + (counts.queued ?? 0) + (counts.awaiting_approval ?? 0),
+        queued: counts.queued ?? 0,
+        running: counts.running ?? 0,
+        awaitingApproval: counts.awaiting_approval ?? 0,
         completed: counts.completed ?? 0,
         failed: counts.failed ?? 0,
         cancelled: counts.cancelled ?? 0,

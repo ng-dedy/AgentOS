@@ -1,3 +1,4 @@
+/* eslint-disable @typescript-eslint/no-explicit-any -- black-box HTTP tests read untyped JSON responses */
 import { Client as TemporalClient, Connection } from "@temporalio/client";
 import { Worker } from "@temporalio/worker";
 import { WORKFLOWS_PATH } from "@agentos/workflows";

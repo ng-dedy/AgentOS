@@ -4,6 +4,7 @@ import { Activity, Bot, CheckCircle2, CircleDollarSign, Plus, ShieldAlert, XCirc
 import Link from "next/link";
 import { AgentAvatar, EmptyState, MockBadge, PageHeader, Stat, StatusBadge } from "@/components/common";
 import { eventSummary } from "@/components/event-timeline";
+import { ExecutionPanel } from "@/components/execution";
 import { Badge, Button, Card, CardContent, CardHeader, CardTitle, Skeleton } from "@/components/ui";
 import { useApi, useEventStream } from "@/lib/hooks";
 import type { Agent, Dashboard, Task } from "@/lib/types";
@@ -15,7 +16,7 @@ export default function DashboardPage() {
   const tasks = useApi<Task[]>("/tasks?limit=8");
   const { events, state } = useEventStream("/events/stream", {
     onEvent: (e) => {
-      if (["task.status", "task.created", "approval.required", "approval.decided", "usage.recorded"].includes(e.type)) {
+      if (["task.status", "task.created", "approval.required", "approval.decided", "usage.recorded", "activity.retry"].includes(e.type)) {
         void dash.reload();
         void tasks.reload();
         void agents.reload();
@@ -53,7 +54,16 @@ export default function DashboardPage() {
         {dash.data ? (
           <>
             <Stat label="Agents" value={dash.data.agents} icon={<Bot />} />
-            <Stat label="Active tasks" value={dash.data.tasks.active} icon={<Activity />} hint={dash.data.pendingApprovals ? `${dash.data.pendingApprovals} awaiting approval` : "none waiting"} />
+            <Stat
+              label="Active tasks"
+              value={dash.data.tasks.active}
+              icon={<Activity />}
+              hint={
+                <span data-testid="active-breakdown">
+                  {dash.data.tasks.queued} queued · {dash.data.tasks.running} running · {dash.data.tasks.awaitingApproval} awaiting approval
+                </span>
+              }
+            />
             <Stat label="Completed" value={dash.data.tasks.completed} icon={<CheckCircle2 />} />
             <Stat label="Failed" value={dash.data.tasks.failed} icon={<XCircle />} hint={dash.data.tasks.cancelled ? `${dash.data.tasks.cancelled} cancelled` : undefined} />
             <Stat
@@ -76,7 +86,7 @@ export default function DashboardPage() {
               <MockBadge key={p.id} />
             ) : (
               <Badge key={p.id} variant={p.configured ? "success" : "secondary"} data-provider={p.id}>
-                {p.label}: {p.configured ? "key set" : "not configured"}
+                {p.label}: {!p.configured ? "not configured" : p.credentialSource === "deployment" ? "deployment key" : "workspace key"}
               </Badge>
             ),
           )}
@@ -155,7 +165,9 @@ export default function DashboardPage() {
           </Card>
         </div>
 
-        <Card className="lg:col-span-2">
+        <div className="flex flex-col gap-6 lg:col-span-2">
+        <ExecutionPanel />
+        <Card>
           <CardHeader className="flex-row items-center justify-between">
             <CardTitle>Live activity</CardTitle>
             <Badge variant={state === "live" ? "success" : "secondary"} data-testid="stream-state">
@@ -185,6 +197,7 @@ export default function DashboardPage() {
             )}
           </CardContent>
         </Card>
+        </div>
       </div>
     </div>
   );

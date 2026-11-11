@@ -76,6 +76,7 @@ export function useEventStream(path: string | null, opts: { onEvent?: (e: RunEve
       "model.delta",
       "model.output",
       "model.retry",
+      "activity.retry",
       "tool.requested",
       "tool.rejected",
       "approval.required",

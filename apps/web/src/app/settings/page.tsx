@@ -1,12 +1,12 @@
 "use client";
 
-import { CheckCircle2, KeyRound, RefreshCw, XCircle } from "lucide-react";
+import { CheckCircle2, KeyRound, Lock, RefreshCw, Trash2, XCircle } from "lucide-react";
 import { useState, type FormEvent } from "react";
 import { ErrorNotice, MockBadge, PageHeader } from "@/components/common";
 import { Badge, Button, Card, CardContent, CardDescription, CardHeader, CardTitle, Input, Label, Select, Skeleton } from "@/components/ui";
 import { api, ApiRequestError } from "@/lib/api";
 import { useApi } from "@/lib/hooks";
-import type { ModelDiscovery, Provider, UsageSummary } from "@/lib/types";
+import type { CredentialsResponse, ModelDiscovery, Provider, UsageSummary } from "@/lib/types";
 import { formatNumber, formatUsd } from "@/lib/utils";
 
 interface Workspace {
@@ -17,12 +17,16 @@ interface Workspace {
   role: string;
 }
 
-const ENV_NAMES: Record<string, string> = { openai: "OPENAI_API_KEY", anthropic: "ANTHROPIC_API_KEY", xai: "XAI_API_KEY", mock: "AGENTOS_ENABLE_MOCK_PROVIDER=true" };
+const ENV_NAMES: Record<string, string> = { openai: "OPENAI_API_KEY", anthropic: "ANTHROPIC_API_KEY", xai: "XAI_API_KEY" };
 
 export default function SettingsPage() {
   const providers = useApi<Provider[]>("/providers");
   const usage = useApi<UsageSummary>("/usage/summary");
   const ws = useApi<Workspace>("/workspace");
+  const creds = useApi<CredentialsResponse>("/credentials");
+  const refresh = async () => {
+    await Promise.all([providers.reload(), creds.reload()]);
+  };
   const [saved, setSaved] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
@@ -46,15 +50,32 @@ export default function SettingsPage() {
       <Card className="mb-6">
         <CardHeader>
           <CardTitle>AI providers</CardTitle>
-          <CardDescription>Keys live only on the API server (environment variables). They are never stored in the database or sent to the browser.</CardDescription>
+          <CardDescription>
+            Each workspace uses its own provider keys. Keys are encrypted at rest (AES-256-GCM envelope encryption), are write-only, and are never sent back to the
+            browser: only the last four characters are shown.
+          </CardDescription>
         </CardHeader>
         <CardContent>
+          {creds.data ? (
+            <div className="mb-4 flex flex-wrap items-center gap-2 text-xs text-muted-foreground" data-testid="credential-storage">
+              <Lock className="size-3.5" />
+              {creds.data.storage.enabled ? (
+                <>
+                  Encrypted with <span className="font-mono">{creds.data.storage.kms}</span>
+                  {creds.data.storage.developmentOnly ? <Badge variant="warning">development KMS, not for production</Badge> : null}
+                </>
+              ) : (
+                <Badge variant="destructive">Credential storage is not configured on this server</Badge>
+              )}
+              {creds.data.allowDeploymentKeys ? <Badge variant="secondary">deployment keys allowed as fallback</Badge> : null}
+            </div>
+          ) : null}
           {!providers.data ? (
             <Skeleton className="h-24" />
           ) : (
             <div className="grid gap-3 md:grid-cols-2" data-testid="provider-list">
               {providers.data.map((p) => (
-                <ProviderCard key={p.id} provider={p} />
+                <ProviderCard key={p.id} provider={p} isOwner={ws.data?.role === "owner"} storageEnabled={creds.data?.storage.enabled ?? false} onChanged={refresh} />
               ))}
             </div>
           )}
@@ -161,7 +182,7 @@ export default function SettingsPage() {
 
 const PRICE_LABEL: Record<string, string> = { published: "published price", unverified: "unverified price", mock: "mock" };
 
-function ProviderCard({ provider: p }: { provider: Provider }) {
+function ProviderCard({ provider: p, isOwner, storageEnabled, onChanged }: { provider: Provider; isOwner: boolean; storageEnabled: boolean; onChanged: () => Promise<void> }) {
   const [discovery, setDiscovery] = useState<ModelDiscovery | null>(p.discovery);
   const [checking, setChecking] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -192,9 +213,7 @@ function ProviderCard({ provider: p }: { provider: Provider }) {
           </Badge>
         )}
       </div>
-      <div className="mt-2 flex items-center gap-1.5 font-mono text-[11px] text-muted-foreground">
-        <KeyRound className="size-3" /> {ENV_NAMES[p.id]}
-      </div>
+      {!p.isMock ? <CredentialRow provider={p} isOwner={isOwner} storageEnabled={storageEnabled} onChanged={onChanged} /> : null}
       {p.endpoint ? <div className="mt-1 break-all font-mono text-[11px] text-muted-foreground">Endpoint: {p.endpoint}</div> : null}
       <ul className="mt-2 flex flex-col gap-1 text-xs">
         {p.models.map((m) => {
@@ -225,6 +244,116 @@ function ProviderCard({ provider: p }: { provider: Provider }) {
         </div>
       ) : null}
       {error ? <ErrorNotice message={error} className="mt-2" /> : null}
+    </div>
+  );
+}
+
+function CredentialRow({ provider: p, isOwner, storageEnabled, onChanged }: { provider: Provider; isOwner: boolean; storageEnabled: boolean; onChanged: () => Promise<void> }) {
+  const c = p.credential;
+  const [editing, setEditing] = useState(false);
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  const [note, setNote] = useState<string | null>(null);
+
+  const run = async (fn: () => Promise<unknown>, done?: string) => {
+    setBusy(true);
+    setError(null);
+    setNote(null);
+    try {
+      await fn();
+      await onChanged();
+      if (done) setNote(done);
+      return true;
+    } catch (err) {
+      setError(err instanceof ApiRequestError ? err.message : "Request failed");
+      return false;
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const save = async (e: FormEvent<HTMLFormElement>) => {
+    e.preventDefault();
+    const form = e.currentTarget;
+    const apiKey = String(new FormData(form).get("apiKey") ?? "");
+    const ok = await run(() => api.put(`/credentials/${p.id}`, { apiKey }), "Saved and checked");
+    if (ok) {
+      form.reset();
+      setEditing(false);
+    }
+  };
+
+  const source =
+    c?.source === "organization" ? (
+      <Badge variant={c.status === "valid" ? "success" : c.status === "invalid" ? "destructive" : "secondary"} data-testid="credential-source">
+        Workspace key ••••{c.keyHint ?? ""} · {c.status === "valid" ? "verified" : c.status === "invalid" ? "rejected" : "not verified"}
+      </Badge>
+    ) : c?.source === "deployment" ? (
+      <Badge variant="warning" data-testid="credential-source">
+        Deployment key ({ENV_NAMES[p.id]})
+      </Badge>
+    ) : (
+      <Badge variant="secondary" data-testid="credential-source">
+        No key
+      </Badge>
+    );
+
+  return (
+    <div className="mt-2 flex flex-col gap-2" data-testid="credential-row">
+      <div className="flex flex-wrap items-center gap-2 text-[11px] text-muted-foreground">
+        <KeyRound className="size-3" /> {source}
+        {c?.lastVerifyError ? <span className="text-destructive">{c.lastVerifyError}</span> : null}
+      </div>
+      {isOwner && storageEnabled ? (
+        editing ? (
+          <form onSubmit={save} className="flex flex-wrap items-center gap-2">
+            <Input
+              name="apiKey"
+              type="password"
+              autoComplete="off"
+              spellCheck={false}
+              placeholder={`${p.label} API key`}
+              aria-label={`${p.label} API key`}
+              className="h-8 min-w-0 flex-1 font-mono text-xs"
+              required
+              minLength={8}
+            />
+            <Button size="sm" type="submit" disabled={busy}>
+              Save and verify
+            </Button>
+            <Button size="sm" variant="ghost" type="button" onClick={() => setEditing(false)}>
+              Cancel
+            </Button>
+          </form>
+        ) : (
+          <div className="flex flex-wrap items-center gap-2">
+            <Button size="sm" variant="secondary" onClick={() => setEditing(true)} data-testid="credential-edit">
+              <KeyRound /> {c?.source === "organization" ? "Replace key" : "Add key"}
+            </Button>
+            {c?.source === "organization" ? (
+              <>
+                <Button size="sm" variant="ghost" disabled={busy} onClick={() => void run(() => api.post(`/credentials/${p.id}/verify`), "Checked")}>
+                  <RefreshCw className={busy ? "animate-spin" : undefined} /> Verify
+                </Button>
+                <Button
+                  size="sm"
+                  variant="ghost"
+                  disabled={busy}
+                  onClick={() => {
+                    if (window.confirm(`Remove the ${p.label} key for this workspace? Agents using ${p.label} will stop working.`)) void run(() => api.delete(`/credentials/${p.id}`), "Removed");
+                  }}
+                >
+                  <Trash2 /> Remove
+                </Button>
+              </>
+            ) : null}
+          </div>
+        )
+      ) : !isOwner ? (
+        <p className="text-[11px] text-muted-foreground">Only workspace owners can manage keys.</p>
+      ) : null}
+      {note ? <span className="text-[11px] text-success">{note}</span> : null}
+      {error ? <ErrorNotice message={error} /> : null}
     </div>
   );
 }

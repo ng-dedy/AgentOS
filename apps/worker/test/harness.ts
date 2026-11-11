@@ -1,3 +1,4 @@
+/* eslint-disable @typescript-eslint/no-explicit-any -- black-box HTTP tests read untyped JSON responses */
 import { spawn, type ChildProcess } from "node:child_process";
 import { randomBytes } from "node:crypto";
 import { mkdtempSync, readFileSync, existsSync } from "node:fs";

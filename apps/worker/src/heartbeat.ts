@@ -17,7 +17,7 @@ export class WorkerHeartbeat {
   ) {}
 
   async start(): Promise<void> {
-    await this.beat("running");
+    await this.beat("running").catch(this.onError);
     this.timer = setInterval(() => void this.beat("running").catch(this.onError), this.intervalMs);
   }
 

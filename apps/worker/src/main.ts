@@ -1,9 +1,10 @@
 import { randomUUID } from "node:crypto";
+import { createServer } from "node:http";
 import { hostname } from "node:os";
 import pino from "pino";
 import { createPrismaClient } from "@agentos/db";
 import { createRuntime, RuntimeConfigSchema } from "@agentos/platform";
-import { createActivities, createAgentWorker } from "@agentos/workflows";
+import { activityStats, createActivities, createAgentWorker } from "@agentos/workflows";
 import { WorkerHeartbeat } from "./heartbeat";
 
 /**
@@ -41,6 +42,16 @@ const heartbeat = new WorkerHeartbeat(prisma, workerId, config.TEMPORAL_TASK_QUE
 await heartbeat.start();
 logger.info({ event: "worker_started", workerId, taskQueue: config.TEMPORAL_TASK_QUEUE, temporal: config.TEMPORAL_ADDRESS }, "worker started");
 
+// Optional liveness endpoint for process supervisors (and the browser test harness).
+const healthPort = Number(process.env.WORKER_HEALTH_PORT ?? 0);
+const health = healthPort
+  ? createServer((req, res) => {
+      const ok = req.url === "/health" && worker.getState() === "RUNNING";
+      res.writeHead(ok ? 200 : 503, { "content-type": "application/json" });
+      res.end(JSON.stringify({ ok, state: worker.getState(), workerId, activeActivities: activityStats.active }));
+    }).listen(healthPort, "127.0.0.1")
+  : null;
+
 let stopping = false;
 for (const signal of ["SIGINT", "SIGTERM"] as const) {
   process.once(signal, () => {
@@ -52,8 +63,10 @@ for (const signal of ["SIGINT", "SIGTERM"] as const) {
 }
 
 try {
+  // run() resolves after shutdown() has drained in-flight tasks.
   await worker.run();
 } finally {
+  health?.close();
   await heartbeat.stop();
   await rt.sink.flush();
   await connection.close();
