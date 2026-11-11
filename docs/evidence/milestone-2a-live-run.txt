@@ -1,0 +1,51 @@
+[live openai] basic: served=gpt-6-luna request=req_874bc9a158e84aaaa4091e9748660c9f tokens=191/8 est$=0.000023
+ ✓ LIVE openai (gpt-6-luna) > 1. basic conversation streams and reports usage 1249ms
+[live openai] tool: calls=1 iterations=2
+ ✓ LIVE openai (gpt-6-luna) > 2. tool calling: real calculator result is used in the answer 2055ms
+[live openai] unauthorized: attempts=1 outcome=completed
+ ✓ LIVE openai (gpt-6-luna) > 3. unauthorized tool: a real model's call to a disallowed tool is blocked 1967ms
+[live openai] handoff: step1={"expression":"7919 * 104729","answer":829348951} step2={"verified":true,"answer":829348951}
+ ✓ LIVE openai (gpt-6-luna) > 4. multi-agent handoff with structured output 5004ms
+[live openai] approval: after rejection outcome=completed
+ ✓ LIVE openai (gpt-6-luna) > 4b. sensitive tool pauses for approval; a rejection is respected 2293ms
+[live openai] bad model: {"code":"PROVIDER_MODEL_NOT_FOUND","kind":"model_not_found","provider":"openai","retryable":false,"status":404,"providerCode":"model_not_found","requestId":"req_26c60d13964f44e5b3e7443a34d705ff","message":"The model id is not available for this account"}
+ ✓ LIVE openai (gpt-6-luna) > 5a. invalid model id fails fast with model_not_found 219ms
+ ✓ LIVE openai (gpt-6-luna) > 5b. invalid credentials fail with provider_auth and are not retried 290ms
+ ✓ LIVE openai (gpt-6-luna) > 5c. timeouts are classified, retried with backoff, then fail as retryable 24ms
+[live openai] cancel: first delta after 3379ms, stopped 10ms after abort
+ ✓ LIVE openai (gpt-6-luna) > 5d. cancelling mid-stream stops the run gracefully 3390ms
+[live openai] usage: calls=2 in=664 out=42 est$=0.000087
+ ✓ LIVE openai (gpt-6-luna) > 6. usage accounting matches per-call records 4215ms
+[live anthropic] basic: served=claude-haiku-5-5 request=req_011CgveAR9QvdmmUVuo9PTJf tokens=278/9 est$=0.000032
+ ✓ LIVE anthropic (claude-haiku-5-5) > 1. basic conversation streams and reports usage 1857ms
+[live anthropic] tool: calls=1 iterations=2
+ ✓ LIVE anthropic (claude-haiku-5-5) > 2. tool calling: real calculator result is used in the answer 4114ms
+[live anthropic] unauthorized: attempts=1 outcome=completed
+ ✓ LIVE anthropic (claude-haiku-5-5) > 3. unauthorized tool: a real model's call to a disallowed tool is blocked 1724ms
+[live anthropic] handoff: step1={"expression":"7919 * 104729","answer":829348951} step2={"verified":true,"answer":829348951}
+ ✓ LIVE anthropic (claude-haiku-5-5) > 4. multi-agent handoff with structured output 2219ms
+[live anthropic] approval: after rejection outcome=completed
+ ✓ LIVE anthropic (claude-haiku-5-5) > 4b. sensitive tool pauses for approval; a rejection is respected 3051ms
+[live anthropic] bad model: {"code":"PROVIDER_MODEL_NOT_FOUND","kind":"model_not_found","provider":"anthropic","retryable":false,"status":404,"providerCode":"not_found_error","requestId":"req_011CgveBNWhFEaXrk8rqFhMH","message":"The model id is not available for this account"}
+ ✓ LIVE anthropic (claude-haiku-5-5) > 5a. invalid model id fails fast with model_not_found 117ms
+ ✓ LIVE anthropic (claude-haiku-5-5) > 5b. invalid credentials fail with provider_auth and are not retried 29ms
+ ✓ LIVE anthropic (claude-haiku-5-5) > 5c. timeouts are classified, retried with backoff, then fail as retryable 23ms
+[live anthropic] cancel: first delta after 1521ms, stopped 2ms after abort
+ ✓ LIVE anthropic (claude-haiku-5-5) > 5d. cancelling mid-stream stops the run gracefully 1523ms
+[live anthropic] usage: calls=2 in=1633 out=72 est$=0.000199
+ ✓ LIVE anthropic (claude-haiku-5-5) > 6. usage accounting matches per-call records 1090ms
+ ↓ LIVE xai (grok-4.7) > 1. basic conversation streams and reports usage
+ ↓ LIVE xai (grok-4.7) > 2. tool calling: real calculator result is used in the answer
+ ↓ LIVE xai (grok-4.7) > 3. unauthorized tool: a real model's call to a disallowed tool is blocked
+ ↓ LIVE xai (grok-4.7) > 4. multi-agent handoff with structured output
+ ↓ LIVE xai (grok-4.7) > 4b. sensitive tool pauses for approval; a rejection is respected
+ ↓ LIVE xai (grok-4.7) > 5a. invalid model id fails fast with model_not_found
+ ↓ LIVE xai (grok-4.7) > 5b. invalid credentials fail with provider_auth and are not retried
+ ↓ LIVE xai (grok-4.7) > 5c. timeouts are classified, retried with backoff, then fail as retryable
+ ↓ LIVE xai (grok-4.7) > 5d. cancelling mid-stream stops the run gracefully
+ ↓ LIVE xai (grok-4.7) > 6. usage accounting matches per-call records
+[live cross] [{"expression":"2024 * 1111 + 7","answer":2248671},{"verified":true,"answer":2248671}]
+ ✓ LIVE cross-provider handoff > OpenAI agent hands off to an Anthropic verifier 6418ms
+ Test Files  1 passed (1)
+      Tests  21 passed | 10 skipped (31)
+   Duration  43.54s (tests 99%, import 1%, transform 1%)

@@ -1,0 +1,33 @@
+{
+  "name": "agentos",
+  "private": true,
+  "type": "module",
+  "packageManager": "pnpm@10.28.0",
+  "engines": {
+    "node": ">=22"
+  },
+  "scripts": {
+    "dev": "turbo run dev",
+    "build": "turbo run build",
+    "typecheck": "turbo run typecheck",
+    "lint": "eslint . && node scripts/check-boundaries.mjs",
+    "test": "turbo run test",
+    "test:e2e": "pnpm --filter @agentos/web test:e2e",
+    "db:migrate": "pnpm --filter @agentos/db migrate:dev",
+    "db:deploy": "pnpm --filter @agentos/db migrate:deploy",
+    "db:seed": "pnpm --filter @agentos/api seed",
+    "verify": "pnpm typecheck && pnpm lint && pnpm test && pnpm test:e2e",
+    "test:live": "pnpm --filter @agentos/runtime test:live",
+    "test:e2e:live": "pnpm --filter @agentos/web test:e2e:live"
+  },
+  "devDependencies": {
+    "@eslint/js": "^10.0.1",
+    "@types/node": "^22.20.5",
+    "eslint": "10.14.0",
+    "tsx": "4.23.15",
+    "turbo": "2.11.10",
+    "typescript": "5.9.3",
+    "typescript-eslint": "8.72.2",
+    "vitest": "5.1.0"
+  }
+}
