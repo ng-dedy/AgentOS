@@ -11,5 +11,17 @@ services:
       test: ["CMD-SHELL", "pg_isready -U postgres"]
       interval: 5s
       retries: 10
+  # Durable execution (milestone 2B). Dev server: single binary, SQLite persistence in a volume.
+  # Production uses a Temporal cluster or Temporal Cloud; see docs/durable-execution.md.
+  temporal:
+    image: temporalio/temporal:1.5.1
+    command: ["server", "start-dev", "--ip", "0.0.0.0", "--db-filename", "/data/temporal.db"]
+    ports: ["7233:7233", "8233:8233"]
+    volumes: ["temporaldata:/data"]
+    healthcheck:
+      test: ["CMD", "temporal", "operator", "cluster", "health", "--address", "127.0.0.1:7233"]
+      interval: 5s
+      retries: 20
 volumes:
   pgdata:
+  temporaldata:

@@ -6,6 +6,7 @@ import { useParams, useRouter } from "next/navigation";
 import { useState } from "react";
 import { ErrorNotice, JsonView, MockBadge, StatusBadge } from "@/components/common";
 import { EventTimeline } from "@/components/event-timeline";
+import { WorkflowPanel } from "@/components/execution";
 import { Badge, Button, Card, CardContent, CardHeader, CardTitle, Skeleton } from "@/components/ui";
 import { api, ApiRequestError, newIdempotencyKey } from "@/lib/api";
 import { useApi, useEventStream } from "@/lib/hooks";
@@ -193,6 +194,7 @@ export default function TaskDetailPage() {
         </Card>
 
         <div className="flex flex-col gap-6 lg:col-span-2">
+          <WorkflowPanel taskId={t.id} status={t.status} />
           <Card>
             <CardHeader>
               <CardTitle>Runs</CardTitle>

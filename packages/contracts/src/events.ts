@@ -7,6 +7,7 @@ export const RunEventTypeSchema = z.enum([
   "model.delta",
   "model.output",
   "model.retry",
+  "activity.retry",
   "tool.requested",
   "tool.rejected",
   "approval.required",

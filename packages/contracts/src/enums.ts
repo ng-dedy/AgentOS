@@ -58,6 +58,7 @@ export const FailureCodeSchema = z.enum([
   "token_limit",
   "interrupted",
   "step_failed",
+  "execution_failed",
   "internal_error",
 ]);
 export type FailureCode = z.infer<typeof FailureCodeSchema>;
@@ -68,5 +69,6 @@ export const RETRYABLE_FAILURES: readonly FailureCode[] = [
   "interrupted",
   "provider_error",
   "step_failed",
+  "execution_failed",
   "internal_error",
 ];

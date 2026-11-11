@@ -1,7 +1,7 @@
 import type { FailureCode, Handoff, RunStatus, TaskKind, TaskStatus, ToolCallStatus, ApprovalStatus } from "@agentos/contracts";
 import { Prisma, type PrismaClient } from "@agentos/db";
 import type { ModelMessage, ToolCallRequest } from "@agentos/providers";
-import type { AgentConfig, ApprovalRecord, PipelineStepSpec, RunRecord, RunStore, TaskRecord, ToolCallRecord } from "@agentos/runtime";
+import type { AgentConfig, ApprovalRecord, AssistantTurn, PipelineStepSpec, RunRecord, RunStore, TaskRecord, ToolCallRecord } from "@agentos/runtime";
 import { jsonSafe } from "../events/bus";
 
 type TaskRow = Prisma.TaskGetPayload<object>;
@@ -27,6 +27,7 @@ export function toTaskRecord(t: TaskRow): TaskRecord {
     failureCode: (t.failureCode as FailureCode | null) ?? null,
     failureMessage: t.failureMessage,
     cancelRequestedAt: t.cancelRequestedAt,
+    maxCostUsd: t.maxCostUsd === null ? null : Number(t.maxCostUsd),
   };
 }
 
@@ -56,10 +57,23 @@ function toToolCallRecord(t: ToolCallRow): ToolCallRecord {
     status: t.status as ToolCallStatus,
     output: t.output ?? null,
     error: t.error,
+    risk: t.risk,
   };
 }
 
 const nullableJson = (v: unknown) => (v === null || v === undefined ? Prisma.DbNull : jsonSafe(v));
+
+const TERMINAL_TOOL_STATUSES = ["succeeded", "failed", "rejected", "invalid", "approval_rejected"];
+
+function toolCallPatch(patch: Parameters<RunStore["updateToolCall"]>[2]) {
+  return {
+    status: patch.status,
+    ...(patch.output !== undefined ? { output: nullableJson(patch.output) } : {}),
+    ...(patch.error !== undefined ? { error: patch.error } : {}),
+    ...(patch.durationMs !== undefined ? { durationMs: patch.durationMs } : {}),
+    ...(TERMINAL_TOOL_STATUSES.includes(patch.status) ? { completedAt: new Date() } : {}),
+  };
+}
 
 /** Prisma implementation of the runtime persistence port. Every query is org-scoped. */
 export class PrismaRunStore implements RunStore {
@@ -219,17 +233,39 @@ export class PrismaRunStore implements RunStore {
   }
 
   async updateToolCall(orgId: string, id: string, patch: Parameters<RunStore["updateToolCall"]>[2]) {
-    const terminal = ["succeeded", "failed", "rejected", "invalid", "approval_rejected"].includes(patch.status);
-    await this.db.toolCall.updateMany({
-      where: { id, organizationId: orgId },
-      data: {
-        status: patch.status,
-        ...(patch.output !== undefined ? { output: nullableJson(patch.output) } : {}),
-        ...(patch.error !== undefined ? { error: patch.error } : {}),
-        ...(patch.durationMs !== undefined ? { durationMs: patch.durationMs } : {}),
-        ...(terminal ? { completedAt: new Date() } : {}),
-      },
+    await this.db.toolCall.updateMany({ where: { id, organizationId: orgId }, data: toolCallPatch(patch) });
+  }
+
+  async getToolCall(orgId: string, id: string) {
+    const row = await this.db.toolCall.findFirst({ where: { id, organizationId: orgId } });
+    return row ? toToolCallRecord(row) : null;
+  }
+
+  /** Single conditional UPDATE: Postgres row locking makes this an atomic compare-and-set. */
+  async transitionToolCall(orgId: string, id: string, from: ToolCallStatus[], patch: Parameters<RunStore["transitionToolCall"]>[3]) {
+    const r = await this.db.toolCall.updateMany({ where: { id, organizationId: orgId, status: { in: from } }, data: toolCallPatch(patch) });
+    return r.count === 1;
+  }
+
+  async getAssistantTurns(orgId: string, conversationId: string, runId: string): Promise<AssistantTurn[]> {
+    const rows = await this.db.message.findMany({
+      where: { organizationId: orgId, conversationId, runId, role: "assistant" },
+      orderBy: { seq: "asc" },
+      select: { content: true, toolCalls: true },
     });
+    return rows.map((m) => ({ content: m.content, toolCalls: (m.toolCalls as ToolCallRequest[] | null) ?? [] }));
+  }
+
+  async hasToolResult(orgId: string, conversationId: string, providerCallId: string) {
+    return (await this.db.message.count({ where: { organizationId: orgId, conversationId, role: "tool", toolCallId: providerCallId } })) > 0;
+  }
+
+  async getTreeSpend(orgId: string, rootTaskId: string) {
+    const r = await this.db.agentRun.aggregate({
+      where: { organizationId: orgId, OR: [{ taskId: rootTaskId }, { task: { parentTaskId: rootTaskId } }] },
+      _sum: { costUsd: true },
+    });
+    return Number(r._sum.costUsd ?? 0);
   }
 
   async listToolCalls(orgId: string, runId: string, status?: ToolCallStatus) {
@@ -238,10 +274,14 @@ export class PrismaRunStore implements RunStore {
   }
 
   async createApproval(orgId: string, input: Parameters<RunStore["createApproval"]>[1]): Promise<ApprovalRecord> {
-    const a = await this.db.approval.create({
-      data: { organizationId: orgId, ...input, arguments: jsonSafe(input.arguments) },
+    // Idempotent on toolCallId (unique): a retried step gets the approval it already created.
+    const a = await this.db.approval.upsert({
+      where: { toolCallId: input.toolCallId },
+      create: { organizationId: orgId, ...input, arguments: jsonSafe(input.arguments) },
+      update: {},
     });
-    return { id: a.id, organizationId: orgId, toolCallId: a.toolCallId, taskId: a.taskId, runId: a.runId, status: "pending", decisionNote: null };
+    if (a.organizationId !== orgId) throw new Error("approval belongs to another organization");
+    return { id: a.id, organizationId: orgId, toolCallId: a.toolCallId, taskId: a.taskId, runId: a.runId, status: a.status as ApprovalStatus, decisionNote: a.decisionNote };
   }
 
   async getApprovalByToolCall(orgId: string, toolCallId: string): Promise<ApprovalRecord | null> {

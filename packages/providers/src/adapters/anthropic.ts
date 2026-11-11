@@ -1,4 +1,5 @@
 import Anthropic from "@anthropic-ai/sdk";
+import { ClientCache } from "../clientCache";
 import {
   classifyStatus,
   parseRetryAfter,
@@ -34,7 +35,7 @@ export class AnthropicProvider implements ModelProvider {
   readonly label = "Anthropic";
   readonly isMock = false;
   readonly endpoint: string;
-  private client: Anthropic | undefined;
+  private readonly clients = new ClientCache<Anthropic>();
 
   constructor(
     private readonly secrets: SecretsProvider,
@@ -49,15 +50,15 @@ export class AnthropicProvider implements ModelProvider {
     return this.secrets.get("ANTHROPIC_API_KEY") !== undefined;
   }
 
-  private getClient(): Anthropic {
-    const key = this.secrets.get("ANTHROPIC_API_KEY");
+  /** `apiKey` is the calling organization's key; without it the deployment key is used. */
+  private getClient(apiKey?: string): Anthropic {
+    const key = apiKey ?? this.secrets.get("ANTHROPIC_API_KEY");
     if (!key) throw providerError("not_configured", this.id);
-    this.client ??= this.clientFactory(key, this.endpoint);
-    return this.client;
+    return this.clients.get(key, () => this.clientFactory(key, this.endpoint));
   }
 
-  async listModels(signal: AbortSignal): Promise<DiscoveredModel[]> {
-    const client = this.getClient();
+  async listModels(signal: AbortSignal, apiKey?: string): Promise<DiscoveredModel[]> {
+    const client = this.getClient(apiKey);
     try {
       const out: DiscoveredModel[] = [];
       for await (const m of client.models.list({ limit: 100 }, { signal })) {
@@ -75,7 +76,7 @@ export class AnthropicProvider implements ModelProvider {
   }
 
   async generate(req: ModelRequest, opts: GenerateOptions): Promise<ModelResponse> {
-    const client = this.getClient();
+    const client = this.getClient(opts.apiKey);
     let started = false;
     let requestId: string | undefined;
     try {

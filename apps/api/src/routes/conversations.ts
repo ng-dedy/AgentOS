@@ -4,6 +4,7 @@ import type { AppDeps } from "../app";
 import { requireAuth } from "../auth/plugin";
 import { AppError, conflict, notFound, parse } from "../http/errors";
 import { idempotent } from "../http/support";
+import { readyProviders } from "../providers/status";
 
 export async function conversationRoutes(app: FastifyInstance, deps: AppDeps) {
   const { prisma, providers, workflow, sink } = deps;
@@ -69,7 +70,9 @@ export async function conversationRoutes(app: FastifyInstance, deps: AppDeps) {
     const c = await prisma.conversation.findFirst({ where: { id, organizationId: auth.organizationId }, include: { agent: true } });
     if (!c) throw notFound("Conversation");
     const p = providers.get(c.agent.provider);
-    if (!p || !p.isConfigured()) throw new AppError(422, "provider_not_configured", `Provider '${c.agent.provider}' is not configured`);
+    if (!p || !(await readyProviders(deps, auth.organizationId)).has(c.agent.provider)) {
+      throw new AppError(422, "provider_not_configured", `Provider '${c.agent.provider}' is not configured for this workspace`);
+    }
     if (c.agent.status !== "active") throw new AppError(422, "agent_paused", "Agent is paused");
     const busy = await prisma.task.findFirst({ where: { conversationId: id, status: { in: ["queued", "running", "awaiting_approval"] } } });
     if (busy && !TERMINAL_TASK_STATUSES.includes(busy.status as TaskStatus)) throw conflict("The agent is still answering the previous message");
@@ -91,7 +94,11 @@ export async function conversationRoutes(app: FastifyInstance, deps: AppDeps) {
         });
       });
       await sink.emit({ organizationId: auth.organizationId, taskId: task.id, runId: null, agentId: c.agentId, type: "task.created", payload: { kind: "chat", title: task.title } });
-      workflow.start(auth.organizationId, task.id);
+      try {
+        await workflow.start(auth.organizationId, task.id);
+      } catch (err) {
+        app.log.warn({ event: "workflow_start_deferred", taskId: task.id, err: err instanceof Error ? err.message : String(err) }, "could not start workflow; will retry");
+      }
       return { status: 202, body: { taskId: task.id } };
     });
   });

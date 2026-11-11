@@ -1,8 +1,8 @@
 import type { FastifyInstance } from "fastify";
 import { z } from "zod";
-import { ApprovalDecisionSchema, ApprovalStatusSchema } from "@agentos/contracts";
+import { ApprovalDecisionSchema, ApprovalStatusSchema, TERMINAL_TASK_STATUSES, type TaskStatus } from "@agentos/contracts";
 import type { AppDeps } from "../app";
-import { requireAuth } from "../auth/plugin";
+import { requireAuth, requireOwner } from "../auth/plugin";
 import { conflict, notFound, parse } from "../http/errors";
 import { audit } from "../http/support";
 
@@ -40,13 +40,31 @@ export async function approvalRoutes(app: FastifyInstance, deps: AppDeps) {
     }));
   });
 
+  /**
+   * Decide an approval. Only workspace owners may decide, only for their own
+   * organization, and only while the run is actually waiting on this tool call:
+   * a decision for a cancelled/finished task or an already-decided approval is
+   * rejected with 409 and changes nothing.
+   */
   app.post("/approvals/:id/decision", async (req) => {
-    const auth = requireAuth(req);
+    const auth = requireOwner(req);
     const { id } = req.params as { id: string };
     const body = parse(ApprovalDecisionSchema, req.body);
     const status = body.decision === "approve" ? "approved" : "rejected";
     const approval = await prisma.approval.findFirst({ where: { id, organizationId: auth.organizationId } });
     if (!approval) throw notFound("Approval");
+    if (approval.status !== "pending") {
+      if (approval.status === status) return { id, status, idempotent: true }; // same decision repeated
+      throw conflict(`Approval was already ${approval.status}`);
+    }
+    const [task, toolCall] = await Promise.all([
+      prisma.task.findFirst({ where: { id: approval.taskId, organizationId: auth.organizationId }, select: { status: true, cancelRequestedAt: true } }),
+      prisma.toolCall.findFirst({ where: { id: approval.toolCallId, organizationId: auth.organizationId }, select: { status: true } }),
+    ]);
+    if (!task || TERMINAL_TASK_STATUSES.includes(task.status as TaskStatus) || task.cancelRequestedAt) {
+      throw conflict("This approval is stale: its task is no longer running");
+    }
+    if (toolCall?.status !== "awaiting_approval") throw conflict("This approval is stale: the tool call is no longer waiting for a decision");
 
     // Compare-and-set so two reviewers cannot both decide.
     const updated = await prisma.approval.updateMany({
@@ -54,8 +72,10 @@ export async function approvalRoutes(app: FastifyInstance, deps: AppDeps) {
       data: { status, decidedById: auth.userId, decisionNote: body.note ?? null, decidedAt: new Date() },
     });
     if (updated.count === 0) {
-      if (approval.status === status) return { id, status, idempotent: true }; // same decision repeated
-      throw conflict(`Approval was already ${approval.status}`);
+      // Lost a race with another reviewer (or the task was cancelled meanwhile).
+      const now = await prisma.approval.findFirst({ where: { id, organizationId: auth.organizationId }, select: { status: true } });
+      if (now?.status === status) return { id, status, idempotent: true };
+      throw conflict(`Approval was already ${now?.status ?? "decided"}`);
     }
     await audit(prisma, auth.organizationId, { type: "user", id: auth.userId }, `approval.${status}`, { type: "approval", id }, {
       toolName: approval.toolName,
@@ -70,7 +90,7 @@ export async function approvalRoutes(app: FastifyInstance, deps: AppDeps) {
       type: "approval.decided",
       payload: { approvalId: id, toolCallId: approval.toolCallId, toolName: approval.toolName, decision: status, note: body.note ?? null },
     });
-    workflow.signalApproval(auth.organizationId, approval.taskId);
+    await workflow.signalApproval(auth.organizationId, approval.taskId);
     return { id, status, idempotent: false };
   });
 

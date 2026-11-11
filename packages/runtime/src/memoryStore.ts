@@ -1,8 +1,10 @@
 import type { RunEvent } from "@agentos/contracts";
 import type { ModelMessage } from "@agentos/providers";
+import type { ToolCallStatus } from "@agentos/contracts";
 import type {
   AgentConfig,
   ApprovalRecord,
+  AssistantTurn,
   EventSink,
   NewEvent,
   RunRecord,
@@ -23,9 +25,13 @@ export class MemoryRunStore implements RunStore, EventSink {
   agents = new Map<string, AgentConfig>();
   runs = new Map<string, RunRecord>();
   messages = new Map<string, ModelMessage[]>();
+  /** runId per message, parallel to `messages` (null for user messages). */
+  messageRuns = new Map<string, (string | null)[]>();
   toolCalls = new Map<string, ToolCallRecord & { organizationId: string; taskId: string }>();
   approvals = new Map<string, ApprovalRecord>();
-  usage: { organizationId: string; runId: string; costUsd: number; inputTokens: number; outputTokens: number; cachedTokens: number }[] = [];
+  usage: { organizationId: string; runId: string; costUsd: number; inputTokens: number; outputTokens: number; cachedTokens: number; latencyMs?: number }[] = [];
+  /** Test hook: number of times a tool call actually moved to `running`. */
+  toolExecutions = new Map<string, number>();
   events: RunEvent[] = [];
   transient: NewEvent[] = [];
   private eventSeq = 0;
@@ -70,7 +76,10 @@ export class MemoryRunStore implements RunStore, EventSink {
       ...t,
     };
     this.tasks.set(task.id, task);
-    if (conversationId) this.messages.set(conversationId, [{ role: "user", content: task.instruction }]);
+    if (conversationId) {
+      this.messages.set(conversationId, [{ role: "user", content: task.instruction }]);
+      this.messageRuns.set(conversationId, [null]);
+    }
     return task;
   }
 
@@ -130,8 +139,25 @@ export class MemoryRunStore implements RunStore, EventSink {
   async loadMessages(_orgId: string, conversationId: string) {
     return [...(this.messages.get(conversationId) ?? [])];
   }
-  async appendMessage(_orgId: string, conversationId: string, _runId: string | null, m: ModelMessage) {
+  async appendMessage(_orgId: string, conversationId: string, runId: string | null, m: ModelMessage) {
     this.messages.set(conversationId, [...(this.messages.get(conversationId) ?? []), m]);
+    this.messageRuns.set(conversationId, [...(this.messageRuns.get(conversationId) ?? []), runId]);
+  }
+  async getAssistantTurns(_orgId: string, conversationId: string, runId: string): Promise<AssistantTurn[]> {
+    const msgs = this.messages.get(conversationId) ?? [];
+    const runs = this.messageRuns.get(conversationId) ?? [];
+    const out: AssistantTurn[] = [];
+    msgs.forEach((m, i) => {
+      if (m.role === "assistant" && runs[i] === runId) out.push({ content: m.content, toolCalls: m.toolCalls ?? [] });
+    });
+    return out;
+  }
+  async hasToolResult(_orgId: string, conversationId: string, providerCallId: string) {
+    return (this.messages.get(conversationId) ?? []).some((m) => m.role === "tool" && m.toolCallId === providerCallId);
+  }
+  async getTreeSpend(orgId: string, rootTaskId: string) {
+    const ids = new Set([rootTaskId, ...[...this.tasks.values()].filter((t) => t.organizationId === orgId && t.parentTaskId === rootTaskId).map((t) => t.id)]);
+    return [...this.runs.values()].filter((r) => r.organizationId === orgId && ids.has(r.taskId)).reduce((a, r) => a + r.costUsd, 0);
   }
   async createToolCall(orgId: string, input: Parameters<RunStore["createToolCall"]>[1]) {
     const existing = [...this.toolCalls.values()].find((t) => t.runId === input.runId && t.providerCallId === input.call.id);
@@ -147,6 +173,7 @@ export class MemoryRunStore implements RunStore, EventSink {
       status: input.status,
       output: null,
       error: null,
+      risk: input.risk,
     };
     this.toolCalls.set(rec.id, rec);
     return { record: { ...rec }, created: true };
@@ -155,10 +182,23 @@ export class MemoryRunStore implements RunStore, EventSink {
     const t = this.own(this.toolCalls.get(id), orgId);
     if (t) Object.assign(t, { status: patch.status, ...(patch.output !== undefined ? { output: patch.output } : {}), ...(patch.error !== undefined ? { error: patch.error } : {}) });
   }
+  async getToolCall(orgId: string, id: string) {
+    const t = this.own(this.toolCalls.get(id), orgId);
+    return t ? { ...t } : null;
+  }
+  async transitionToolCall(orgId: string, id: string, from: ToolCallStatus[], patch: Parameters<RunStore["transitionToolCall"]>[3]) {
+    const t = this.own(this.toolCalls.get(id), orgId);
+    if (!t || !from.includes(t.status)) return false;
+    if (patch.status === "running") this.toolExecutions.set(id, (this.toolExecutions.get(id) ?? 0) + 1);
+    Object.assign(t, { status: patch.status, ...(patch.output !== undefined ? { output: patch.output } : {}), ...(patch.error !== undefined ? { error: patch.error } : {}) });
+    return true;
+  }
   async listToolCalls(orgId: string, runId: string, status?: string) {
     return [...this.toolCalls.values()].filter((t) => t.organizationId === orgId && t.runId === runId && (!status || t.status === status));
   }
   async createApproval(orgId: string, input: Parameters<RunStore["createApproval"]>[1]) {
+    const existing = [...this.approvals.values()].find((x) => x.organizationId === orgId && x.toolCallId === input.toolCallId);
+    if (existing) return { ...existing };
     const a: ApprovalRecord = { id: nextId("appr"), organizationId: orgId, toolCallId: input.toolCallId, taskId: input.taskId, runId: input.runId, status: "pending", decisionNote: null };
     this.approvals.set(a.id, a);
     return { ...a };
@@ -179,7 +219,7 @@ export class MemoryRunStore implements RunStore, EventSink {
     return n;
   }
   async recordUsage(orgId: string, input: Parameters<RunStore["recordUsage"]>[1]) {
-    this.usage.push({ organizationId: orgId, runId: input.runId, costUsd: input.costUsd, inputTokens: input.inputTokens, outputTokens: input.outputTokens, cachedTokens: input.cachedTokens });
+    this.usage.push({ organizationId: orgId, runId: input.runId, costUsd: input.costUsd, inputTokens: input.inputTokens, outputTokens: input.outputTokens, cachedTokens: input.cachedTokens, latencyMs: input.latencyMs });
   }
 
   /** Test helper: decide an approval as a human would through the API. */

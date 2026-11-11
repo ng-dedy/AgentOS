@@ -28,12 +28,16 @@ export type AgentCreate = z.infer<typeof AgentCreateSchema>;
 export const AgentUpdateSchema = AgentCreateSchema.partial();
 export type AgentUpdate = z.infer<typeof AgentUpdateSchema>;
 
+/** Optional spending limit for the whole task (all runs and pipeline steps), in USD. */
+const maxCost = z.number().positive().max(10_000).optional();
+
 export const TaskCreateSchema = z.discriminatedUnion("kind", [
   z.object({
     kind: z.literal("single"),
     agentId: id,
     title: z.string().trim().min(1).max(200),
     instruction: z.string().trim().min(1).max(20_000),
+    maxCostUsd: maxCost,
   }),
   z.object({
     kind: z.literal("pipeline"),
@@ -42,6 +46,7 @@ export const TaskCreateSchema = z.discriminatedUnion("kind", [
     steps: z
       .array(z.object({ agentId: id, instruction: z.string().trim().min(1).max(20_000) }))
       .length(2, "Milestone 1 pipelines have exactly two sequential steps"),
+    maxCostUsd: maxCost,
   }),
 ]);
 export type TaskCreate = z.infer<typeof TaskCreateSchema>;
@@ -52,6 +57,13 @@ export const ConversationCreateSchema = z.object({ title: z.string().trim().max(
 export const ApprovalDecisionSchema = z.object({
   decision: z.enum(["approve", "reject"]),
   note: z.string().max(2000).optional(),
+});
+
+/** Store or replace an organization's own provider API key. */
+export const CredentialPutSchema = z.object({
+  apiKey: z.string().trim().min(8).max(500).regex(/^[\x21-\x7e]+$/, "API keys contain printable ASCII characters only"),
+  /** Check the key against the provider's Models API before saving. Default true. */
+  verify: z.boolean().optional(),
 });
 export type ApprovalDecision = z.infer<typeof ApprovalDecisionSchema>;
 

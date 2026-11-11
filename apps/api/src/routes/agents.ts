@@ -5,10 +5,11 @@ import type { AppDeps } from "../app";
 import { requireAuth } from "../auth/plugin";
 import { AppError, notFound, parse } from "../http/errors";
 import { audit, idempotent, money } from "../http/support";
+import { readyProviders } from "../providers/status";
 
 type AgentRow = Prisma.AgentGetPayload<{ include: { skills: { include: { skill: true } } } }>;
 
-export function serializeAgent(a: AgentRow, providers: AppDeps["providers"]) {
+export function serializeAgent(a: AgentRow, providers: AppDeps["providers"], ready: Set<string>) {
   const provider = providers.get(a.provider);
   return {
     id: a.id,
@@ -17,7 +18,7 @@ export function serializeAgent(a: AgentRow, providers: AppDeps["providers"]) {
     instructions: a.instructions,
     provider: a.provider,
     model: a.model,
-    providerConfigured: provider?.isConfigured() ?? false,
+    providerConfigured: ready.has(a.provider),
     isMock: provider?.isMock ?? false,
     allowedTools: a.allowedTools,
     maxIterations: a.maxIterations,
@@ -59,7 +60,8 @@ export async function agentRoutes(app: FastifyInstance, deps: AppDeps) {
       _count: true,
     });
     const activeBy = new Map(active.map((r) => [r.agentId, r._count]));
-    return rows.map((a) => ({ ...serializeAgent(a, providers), activeTasks: activeBy.get(a.id) ?? 0 }));
+    const ready = await readyProviders(deps, organizationId);
+    return rows.map((a) => ({ ...serializeAgent(a, providers, ready), activeTasks: activeBy.get(a.id) ?? 0 }));
   });
 
   app.post("/agents", async (req, reply) => {
@@ -81,7 +83,7 @@ export async function agentRoutes(app: FastifyInstance, deps: AppDeps) {
           include,
         });
         await audit(prisma, auth.organizationId, { type: "user", id: auth.userId }, "agent.created", { type: "agent", id: agent.id }, { name: agent.name, tools: agent.allowedTools });
-        return { status: 201, body: serializeAgent(agent, providers) };
+        return { status: 201, body: serializeAgent(agent, providers, await readyProviders(deps, auth.organizationId)) };
       } catch (err) {
         throw uniqueName(err);
       }
@@ -98,7 +100,7 @@ export async function agentRoutes(app: FastifyInstance, deps: AppDeps) {
       prisma.usageRecord.aggregate({ where: { organizationId, agentId: id }, _sum: { costUsd: true, inputTokens: true, outputTokens: true }, _count: true }),
     ]);
     return {
-      ...serializeAgent(agent, providers),
+      ...serializeAgent(agent, providers, await readyProviders(deps, organizationId)),
       recentTasks: recentTasks.map((t) => ({ id: t.id, title: t.title, kind: t.kind, status: t.status, createdAt: t.createdAt.toISOString() })),
       usage: {
         modelCalls: usage._count,
@@ -134,7 +136,7 @@ export async function agentRoutes(app: FastifyInstance, deps: AppDeps) {
         });
       });
       await audit(prisma, auth.organizationId, { type: "user", id: auth.userId }, "agent.updated", { type: "agent", id }, { fields: Object.keys(body) });
-      return serializeAgent(agent, providers);
+      return serializeAgent(agent, providers, await readyProviders(deps, auth.organizationId));
     } catch (err) {
       throw uniqueName(err);
     }

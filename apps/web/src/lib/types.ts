@@ -40,6 +40,67 @@ export interface Provider {
   endpoint: string | null;
   models: { id: string; label: string; inputPerMTok: number; outputPerMTok: number; priceSource: "published" | "unverified" | "mock" }[];
   discovery: ModelDiscovery | null;
+  credential: CredentialInfo | null;
+}
+
+export interface CredentialInfo {
+  provider: string;
+  source: "organization" | "deployment" | "none";
+  keyHint: string | null;
+  status: "unverified" | "valid" | "invalid" | null;
+  lastVerifiedAt: string | null;
+  lastVerifyError: string | null;
+  kekId: string | null;
+  updatedAt: string | null;
+}
+
+export interface CredentialsResponse {
+  storage: { enabled: boolean; kms: string | null; developmentOnly: boolean };
+  allowDeploymentKeys: boolean;
+  items: CredentialInfo[];
+}
+
+export interface SystemHealth {
+  engine: "temporal" | "inprocess";
+  taskQueue: string | null;
+  temporal: { reachable: boolean; workflowPollers: number; activityPollers: number; error?: string } | null;
+  workers: { id: string; hostname?: string; pid?: number; status: string; activeActivities: number; lastSeenAt: string; startedAt: string; healthy: boolean; version: string }[];
+  healthyWorkers: number;
+  events: { crossInstance: boolean; listenerConnected: boolean; reconnects: number };
+  credentials: { enabled: boolean; kms: string | null; developmentOnly: boolean };
+}
+
+export interface SystemMetrics {
+  queueLatencyMs: { p50: number | null; p95: number | null; samples: number };
+  runDurationMs: { p50: number | null; p95: number | null; samples: number };
+  modelLatencyMs: { provider: string; p50: number | null; p95: number | null; samples: number }[];
+  failuresByCode: { code: string; count: number }[];
+  retries: { model: number; activity: number };
+}
+
+export interface Diagnostics {
+  checkedAt: string;
+  engine: string;
+  issues: { kind: string; taskId?: string; detail: string; hint: string }[];
+}
+
+export interface WorkflowInfo {
+  engine: "temporal" | "inprocess";
+  workflowId: string | null;
+  status: string;
+  historyLength?: number;
+  startTime?: string | null;
+  closeTime?: string | null;
+  pendingActivities: { activityType: string; attempt: number; state: string; lastFailure?: string | null; lastHeartbeatTime?: string | null }[];
+}
+
+export interface TaskWorkflow {
+  taskId: string;
+  status: string;
+  workflowId: string | null;
+  workflow: WorkflowInfo | null;
+  children: { taskId: string; stepIndex: number | null; status: string; workflow: WorkflowInfo | null }[];
+  retryHistory: { seq: string; type: string; taskId: string; payload: Record<string, unknown>; createdAt: string }[];
 }
 
 export interface ModelDiscovery {
@@ -83,6 +144,8 @@ export interface Task {
   failureMessage: string | null;
   retryable: boolean;
   retryOfId: string | null;
+  workflowId?: string | null;
+  maxCostUsd?: number | null;
   handoffInput: { fromAgentName: string; summary: string; data: unknown } | null;
   createdAt: string;
   startedAt: string | null;
@@ -154,7 +217,7 @@ export interface AuditEntry {
 
 export interface Dashboard {
   agents: number;
-  tasks: { active: number; completed: number; failed: number; cancelled: number };
+  tasks: { active: number; queued: number; running: number; awaitingApproval: number; completed: number; failed: number; cancelled: number };
   pendingApprovals: number;
   usage: {
     modelCalls: number;
@@ -164,7 +227,7 @@ export interface Dashboard {
     live: { modelCalls: number; costUsd: number };
     mock: { modelCalls: number; costUsd: number };
   };
-  providers: { id: string; label: string; configured: boolean; isMock: boolean }[];
+  providers: { id: string; label: string; configured: boolean; isMock: boolean; credentialSource: "organization" | "deployment" | "none" | null }[];
 }
 
 export interface UsageSummary {

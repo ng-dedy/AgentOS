@@ -18,12 +18,14 @@ import type { GenerateOptions, ModelMessage, ModelProvider, ModelRequest, ModelR
  *   [mock:approval]       call the approval-gated mock_external_action tool
  *   [mock:repeat_bad_tool] keep requesting a disallowed tool (failed-tool loop guard)
  *   [mock:refusal]        return a refusal stop reason
+ *   [mock:flaky]          fail the first call for each conversation with a retryable rate_limit
  */
 export class MockProvider implements ModelProvider {
   readonly id = "mock" as const;
   readonly label = "MOCK (scripted, not an AI model)";
   readonly isMock = true;
   private counter = 0;
+  private readonly flaked = new Set<string>();
 
   constructor(private readonly options: { slowMs?: number } = {}) {}
 
@@ -42,6 +44,14 @@ export class MockProvider implements ModelProvider {
 
     const errMatch = /\[mock:error=([a-z_]+)\]/.exec(instruction);
     if (errMatch) throw providerError(errMatch[1] as Parameters<typeof providerError>[0], this.id);
+
+    if (instruction.includes("[mock:flaky]")) {
+      const key = `${req.system.length}:${instruction}`;
+      if (!this.flaked.has(key)) {
+        this.flaked.add(key);
+        throw providerError("rate_limit", this.id);
+      }
+    }
 
     if (instruction.includes("[mock:slow]")) await sleep(this.options.slowMs ?? 3000, opts.signal);
 

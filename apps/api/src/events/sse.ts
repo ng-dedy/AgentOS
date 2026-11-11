@@ -1,6 +1,6 @@
 import type { FastifyReply, FastifyRequest } from "fastify";
 import type { RunEvent } from "@agentos/contracts";
-import type { EventBus } from "./bus";
+import type { EventBus } from "@agentos/platform";
 
 interface StreamOptions {
   orgId: string;
@@ -21,8 +21,12 @@ export function lastEventId(req: FastifyRequest): bigint {
 
 /**
  * Server-Sent Events with gap-free replay: subscribe first (buffering), replay
- * persisted rows after Last-Event-ID, then flush buffered live events that are
- * newer than the last replayed seq.
+ * persisted rows after Last-Event-ID, then flush buffered live events.
+ *
+ * Duplicates are dropped by a set of delivered seqs rather than a "greater than the
+ * last seq" cursor: events from different writers (two workers, two tasks) can commit
+ * slightly out of seq order, and a cursor would silently drop the later-committed,
+ * lower-seq event. Within one task there is a single writer, so per-task order holds.
  */
 export async function streamEvents(req: FastifyRequest, reply: FastifyReply, bus: EventBus, opts: StreamOptions) {
   const after = lastEventId(req);
@@ -41,11 +45,14 @@ export async function streamEvents(req: FastifyRequest, reply: FastifyReply, bus
   let lastSeq = after;
   let replaying = true;
   const buffer: RunEvent[] = [];
+  const delivered = new Set<string>();
   const write = (e: RunEvent) => {
     if (e.seq !== null) {
       const s = BigInt(e.seq);
-      if (s <= lastSeq) return;
-      lastSeq = s;
+      if (s <= after || delivered.has(e.seq)) return;
+      delivered.add(e.seq);
+      if (delivered.size > 10_000) delivered.delete(delivered.values().next().value!);
+      if (s > lastSeq) lastSeq = s;
       res.write(`id: ${e.seq}\nevent: ${e.type}\ndata: ${JSON.stringify(e)}\n\n`);
     } else {
       res.write(`event: ${e.type}\ndata: ${JSON.stringify(e)}\n\n`);

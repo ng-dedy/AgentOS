@@ -112,12 +112,18 @@ describe("providers", () => {
       ["xai", false, false],
       ["mock", true, true],
     ]);
-    const keyed = await makeApp({}, { get: (k) => (k === "XAI_API_KEY" ? "xai-super-secret" : undefined) });
-    const s = await signup(keyed.app);
-    const res = await keyed.app.inject({ method: "GET", url: "/api/v1/providers", headers: { cookie: s.cookie } });
-    expect(res.body).not.toContain("xai-super-secret");
-    expect((res.json() as { id: string; configured: boolean }[]).find((p) => p.id === "xai")?.configured).toBe(true);
-    await keyed.app.close();
+    // A deployment key counts only when the deployment explicitly allows it (milestone 2B).
+    const secrets = { get: (k: string) => (k === "XAI_API_KEY" ? "xai-super-secret" : undefined) };
+    for (const [allow, expected] of [["false", false], ["true", true]] as const) {
+      const keyed = await makeApp({ AGENTOS_ALLOW_DEPLOYMENT_KEYS: allow }, secrets);
+      const s = await signup(keyed.app);
+      const res = await keyed.app.inject({ method: "GET", url: "/api/v1/providers", headers: { cookie: s.cookie } });
+      expect(res.body).not.toContain("xai-super-secret");
+      const xai = (res.json() as { id: string; configured: boolean; credential: { source: string } | null }[]).find((p) => p.id === "xai");
+      expect(xai?.configured).toBe(expected);
+      expect(xai?.credential?.source).toBe(expected ? "deployment" : "none");
+      await keyed.app.close();
+    }
   });
 
   it("refuses to start tasks on unconfigured providers", async () => {
@@ -133,7 +139,7 @@ describe("task execution", () => {
     const atlas = await createAgent(a);
     const created = await api(app, a).post("/tasks", { kind: "single", agentId: atlas.id, title: "Math", instruction: "What is (17 * 23) + 4?" });
     expect(created.status).toBe(201);
-    await deps.workflow.idle();
+    await deps.workflow.idle?.();
 
     const task = (await api(app, a).get(`/tasks/${created.body.id}`)).body;
     expect(task).toMatchObject({ status: "completed", agent: { name: "Atlas" } });
@@ -177,7 +183,7 @@ describe("task execution", () => {
   it("records unauthorized tool requests as rejected", async () => {
     const atlas = await createAgent(a);
     const t = await api(app, a).post("/tasks", { kind: "single", agentId: atlas.id, title: "t", instruction: "[mock:unknown_tool]" });
-    await deps.workflow.idle();
+    await deps.workflow.idle?.();
     const task = (await api(app, a).get(`/tasks/${t.body.id}`)).body;
     expect(task.runs[0].toolCalls[0]).toMatchObject({ toolName: "shell_exec", status: "rejected" });
   });
@@ -191,7 +197,7 @@ describe("task execution", () => {
     expect(second.headers["idempotent-replay"]).toBe("true");
     expect(second.body.id).toBe(first.body.id);
     expect((await api(app, a).post("/tasks", { ...body, title: "Different" }, { "idempotency-key": "k-1" })).status).toBe(409);
-    await deps.workflow.idle();
+    await deps.workflow.idle?.();
     expect(await db().task.count({ where: { organizationId: a.orgId, title: "Once" } })).toBe(1);
   });
 
@@ -201,7 +207,7 @@ describe("task execution", () => {
     await waitFor(() => deps.engine.isActive(t.body.id));
     const c = await api(app, a).post(`/tasks/${t.body.id}/cancel`);
     expect(c.status).toBe(202);
-    await deps.workflow.idle();
+    await deps.workflow.idle?.();
     const task = (await api(app, a).get(`/tasks/${t.body.id}`)).body;
     expect(task.status).toBe("cancelled");
     expect(task.runs[0].status).toBe("cancelled");
@@ -211,17 +217,17 @@ describe("task execution", () => {
   it("retries a task that failed with a retryable error", async () => {
     const atlas = await createAgent(a);
     const t = await api(app, a).post("/tasks", { kind: "single", agentId: atlas.id, title: "flaky", instruction: "[mock:error=rate_limit]" });
-    await deps.workflow.idle();
+    await deps.workflow.idle?.();
     const failed = (await api(app, a).get(`/tasks/${t.body.id}`)).body;
     expect(failed).toMatchObject({ status: "failed", failureCode: "provider_retryable_error", retryable: true });
     const retry = await api(app, a).post(`/tasks/${t.body.id}/retry`);
     expect(retry.status).toBe(201);
     expect(retry.body.retryOfId).toBe(t.body.id);
-    await deps.workflow.idle();
+    await deps.workflow.idle?.();
 
     // Hitting an enforced limit is not retryable: the agent config must change first.
     const loop = await api(app, a).post("/tasks", { kind: "single", agentId: atlas.id, title: "loop", instruction: "[mock:loop]" });
-    await deps.workflow.idle();
+    await deps.workflow.idle?.();
     expect((await api(app, a).get(`/tasks/${loop.body.id}`)).body).toMatchObject({ failureCode: "iteration_limit", retryable: false });
     expect((await api(app, a).post(`/tasks/${loop.body.id}/retry`)).status).toBe(409);
   });
@@ -239,7 +245,7 @@ describe("approvals", () => {
   async function waitingTask() {
     const ops = await createAgent(a, { name: "Ops", allowedTools: ["mock_external_action"] });
     const t = await api(app, a).post("/tasks", { kind: "single", agentId: ops.id, title: "notify", instruction: "[mock:approval] tell ops" });
-    await deps.workflow.idle();
+    await deps.workflow.idle?.();
     const approvals = (await api(app, a).get("/approvals?status=pending")).body;
     return { taskId: t.body.id as string, approval: approvals[0] };
   }
@@ -253,7 +259,7 @@ describe("approvals", () => {
     expect((await api(app, b).post(`/approvals/${approval.id}/decision`, { decision: "approve" })).status).toBe(404);
     const d = await api(app, a).post(`/approvals/${approval.id}/decision`, { decision: "approve", note: "ok" });
     expect(d.body).toMatchObject({ status: "approved", idempotent: false });
-    await deps.workflow.idle();
+    await deps.workflow.idle?.();
     const task = (await api(app, a).get(`/tasks/${taskId}`)).body;
     expect(task.status).toBe("completed");
     expect(task.runs[0].toolCalls[0]).toMatchObject({ status: "succeeded", output: { mock: true, status: "simulated" } });
@@ -267,7 +273,7 @@ describe("approvals", () => {
   it("rejection is returned to the agent and the tool never runs", async () => {
     const { taskId, approval } = await waitingTask();
     await api(app, a).post(`/approvals/${approval.id}/decision`, { decision: "reject", note: "change freeze" });
-    await deps.workflow.idle();
+    await deps.workflow.idle?.();
     const task = (await api(app, a).get(`/tasks/${taskId}`)).body;
     expect(task.status).toBe("completed");
     expect(task.runs[0].toolCalls[0]).toMatchObject({ status: "approval_rejected", output: null });
@@ -289,7 +295,7 @@ describe("two-agent pipeline", () => {
       ],
     });
     expect(r.status).toBe(201);
-    await deps.workflow.idle();
+    await deps.workflow.idle?.();
     const task = (await api(app, a).get(`/tasks/${r.body.id}`)).body;
     expect(task.status).toBe("completed");
     expect(task.children.map((c: { agent: { name: string }; status: string }) => [c.agent.name, c.status])).toEqual([
@@ -316,12 +322,12 @@ describe("chat", () => {
     const conv = (await api(app, a).post(`/agents/${atlas.id}/conversations`, {})).body;
     const sent = await api(app, a).post(`/conversations/${conv.id}/messages`, { content: "What is 9 * 9?" });
     expect(sent.status).toBe(202);
-    await deps.workflow.idle();
+    await deps.workflow.idle?.();
     const c = (await api(app, a).get(`/conversations/${conv.id}`)).body;
     expect(c.messages.at(-1).content).toContain("Final answer: 81");
     const second = await api(app, a).post(`/conversations/${conv.id}/messages`, { content: "Thanks" });
     expect(second.status).toBe(202);
-    await deps.workflow.idle();
+    await deps.workflow.idle?.();
     expect((await api(app, a).get(`/agents/${atlas.id}/conversations`)).body).toHaveLength(1);
   });
 });
@@ -332,7 +338,7 @@ describe("server-sent events", () => {
     const base = `http://127.0.0.1:${(app.server.address() as AddressInfo).port}`;
     const atlas = await createAgent(a);
     const t = await api(app, a).post("/tasks", { kind: "single", agentId: atlas.id, title: "sse", instruction: "What is 3 * 3?" });
-    await deps.workflow.idle();
+    await deps.workflow.idle?.();
     const all = (await api(app, a).get(`/tasks/${t.body.id}/events`)).body as { seq: string; type: string }[];
     const mid = all[4]!.seq;
 
@@ -358,7 +364,7 @@ describe("server-sent events", () => {
     expect(live.every((e) => e.event === "replay.done" || e.id)).toBe(true);
     const completed = live.find((e) => e.event === "run.completed")!;
     expect(JSON.parse(completed.data)).toMatchObject({ taskId: t2.body.id, payload: { result: expect.stringContaining("16") } });
-    await deps.workflow.idle();
+    await deps.workflow.idle?.();
   });
 });
 

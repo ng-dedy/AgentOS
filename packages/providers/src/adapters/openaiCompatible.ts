@@ -1,4 +1,5 @@
 import OpenAI from "openai";
+import { ClientCache } from "../clientCache";
 import type { ProviderId } from "@agentos/contracts";
 import {
   classifyStatus,
@@ -42,7 +43,7 @@ export class OpenAICompatibleProvider implements ModelProvider {
   readonly label: string;
   readonly isMock = false;
   readonly endpoint: string;
-  private client: OpenAI | undefined;
+  private readonly clients = new ClientCache<OpenAI>();
 
   constructor(
     private readonly config: Config,
@@ -59,15 +60,15 @@ export class OpenAICompatibleProvider implements ModelProvider {
     return this.secrets.get(this.config.secretName) !== undefined;
   }
 
-  private getClient(): OpenAI {
-    const key = this.secrets.get(this.config.secretName);
+  /** `apiKey` is the calling organization's key; without it the deployment key is used. */
+  private getClient(apiKey?: string): OpenAI {
+    const key = apiKey ?? this.secrets.get(this.config.secretName);
     if (!key) throw providerError("not_configured", this.id);
-    this.client ??= this.clientFactory(key, this.config.baseURL);
-    return this.client;
+    return this.clients.get(key, () => this.clientFactory(key, this.config.baseURL));
   }
 
-  async listModels(signal: AbortSignal): Promise<DiscoveredModel[]> {
-    const client = this.getClient();
+  async listModels(signal: AbortSignal, apiKey?: string): Promise<DiscoveredModel[]> {
+    const client = this.getClient(apiKey);
     try {
       const out: DiscoveredModel[] = [];
       for await (const m of client.models.list({ signal })) out.push({ id: m.id });
@@ -78,7 +79,7 @@ export class OpenAICompatibleProvider implements ModelProvider {
   }
 
   async generate(req: ModelRequest, opts: GenerateOptions): Promise<ModelResponse> {
-    const client = this.getClient();
+    const client = this.getClient(opts.apiKey);
     const acc = new ChatStreamAccumulator();
     try {
       return await withTimeout(this.id, opts.timeoutMs, opts.signal, async (signal) => {

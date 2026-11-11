@@ -4,10 +4,11 @@ import { RETRYABLE_FAILURES, TaskCreateSchema, TaskStatusSchema, TERMINAL_TASK_S
 import type { Prisma } from "@agentos/db";
 import type { AppDeps } from "../app";
 import { requireAuth } from "../auth/plugin";
-import { toRunEvent } from "../events/bus";
+import { toRunEvent } from "@agentos/platform";
 import { lastEventId, streamEvents } from "../events/sse";
 import { AppError, conflict, notFound, parse } from "../http/errors";
 import { audit, idempotent, money } from "../http/support";
+import { providersForOrg, readyProviders } from "../providers/status";
 
 const ListQuery = z.object({
   status: TaskStatusSchema.optional(),
@@ -34,6 +35,8 @@ export function serializeTask(t: TaskRow) {
     failureMessage: t.failureMessage,
     retryable: t.status === "failed" && t.parentTaskId === null && RETRYABLE_FAILURES.includes(t.failureCode as FailureCode),
     retryOfId: t.retryOfId,
+    workflowId: t.workflowId,
+    maxCostUsd: t.maxCostUsd === null ? null : Number(t.maxCostUsd),
     handoffInput: t.handoffInput ?? null,
     createdAt: t.createdAt.toISOString(),
     startedAt: t.startedAt?.toISOString() ?? null,
@@ -50,8 +53,8 @@ export async function taskRoutes(app: FastifyInstance, deps: AppDeps) {
     if (!agent) throw new AppError(404, "not_found", "Agent not found");
     if (agent.status !== "active") throw new AppError(422, "agent_paused", `Agent '${agent.name}' is paused`);
     const p = providers.get(agent.provider);
-    if (!p || !p.isConfigured()) {
-      throw new AppError(422, "provider_not_configured", `Provider '${agent.provider}' for agent '${agent.name}' is not configured`);
+    if (!p || !(await readyProviders(deps, orgId)).has(agent.provider)) {
+      throw new AppError(422, "provider_not_configured", `Provider '${agent.provider}' for agent '${agent.name}' is not configured for this workspace`);
     }
     return agent;
   }
@@ -64,7 +67,17 @@ export async function taskRoutes(app: FastifyInstance, deps: AppDeps) {
         const conversation = await tx.conversation.create({ data: { organizationId: orgId, agentId: agent.id, title: body.title } });
         await tx.message.create({ data: { organizationId: orgId, conversationId: conversation.id, role: "user", content: body.instruction } });
         return tx.task.create({
-          data: { organizationId: orgId, kind: "single", title: body.title, instruction: body.instruction, agentId: agent.id, conversationId: conversation.id, createdById: userId, retryOfId },
+          data: {
+            organizationId: orgId,
+            kind: "single",
+            title: body.title,
+            instruction: body.instruction,
+            agentId: agent.id,
+            conversationId: conversation.id,
+            createdById: userId,
+            retryOfId,
+            ...(body.maxCostUsd !== undefined ? { maxCostUsd: body.maxCostUsd } : {}),
+          },
           include: withAgent,
         });
       });
@@ -80,6 +93,7 @@ export async function taskRoutes(app: FastifyInstance, deps: AppDeps) {
         agentId: body.steps[0]!.agentId,
         createdById: userId,
         retryOfId,
+        ...(body.maxCostUsd !== undefined ? { maxCostUsd: body.maxCostUsd } : {}),
       },
       include: withAgent,
     });
@@ -87,7 +101,12 @@ export async function taskRoutes(app: FastifyInstance, deps: AppDeps) {
 
   async function launch(orgId: string, task: TaskRow) {
     await sink.emit({ organizationId: orgId, taskId: task.id, runId: null, agentId: task.agentId, type: "task.created", payload: { kind: task.kind, title: task.title } });
-    workflow.start(orgId, task.id);
+    // If the workflow service is unavailable the task stays queued; the dispatcher starts it later.
+    try {
+      await workflow.start(orgId, task.id);
+    } catch (err) {
+      app.log.warn({ event: "workflow_start_deferred", taskId: task.id, err: err instanceof Error ? err.message : String(err) }, "could not start workflow; will retry");
+    }
   }
 
   app.get("/tasks", async (req) => {
@@ -236,6 +255,7 @@ export async function taskRoutes(app: FastifyInstance, deps: AppDeps) {
         task.kind === "pipeline"
           ? { kind: "pipeline" as const, title: task.title, instruction: task.instruction, steps: task.pipelineSpec as { agentId: string; instruction: string }[] }
           : { kind: "single" as const, title: task.title, instruction: task.instruction, agentId: task.agentId ?? "" };
+      if (task.maxCostUsd !== null) Object.assign(body, { maxCostUsd: Number(task.maxCostUsd) });
       const retry = await createTask(auth.organizationId, auth.userId, parse(TaskCreateSchema, body), task.id);
       await audit(prisma, auth.organizationId, { type: "user", id: auth.userId }, "task.retried", { type: "task", id: retry.id }, { retryOf: id });
       await launch(auth.organizationId, retry);
@@ -263,6 +283,9 @@ export async function taskRoutes(app: FastifyInstance, deps: AppDeps) {
       agents,
       tasks: {
         active: (counts.running ?? 0) + (counts.queued ?? 0) + (counts.awaiting_approval ?? 0),
+        queued: counts.queued ?? 0,
+        running: counts.running ?? 0,
+        awaitingApproval: counts.awaiting_approval ?? 0,
         completed: counts.completed ?? 0,
         failed: counts.failed ?? 0,
         cancelled: counts.cancelled ?? 0,
@@ -275,7 +298,7 @@ export async function taskRoutes(app: FastifyInstance, deps: AppDeps) {
         outputTokens: usage._sum.outputTokens ?? 0,
         ...split,
       },
-      providers: deps.providers.list().map((p) => ({ id: p.id, label: p.label, configured: p.configured, isMock: p.isMock })),
+      providers: (await providersForOrg(deps, organizationId)).map((p) => ({ id: p.id, label: p.label, configured: p.configured, isMock: p.isMock, credentialSource: p.credential?.source ?? null })),
     };
   });
 }

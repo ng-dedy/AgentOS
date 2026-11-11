@@ -7,7 +7,13 @@ const root = new URL("..", import.meta.url).pathname;
 
 const RULES = [
   { dir: "packages/contracts/src", forbid: [/^@agentos\//, /^@prisma\//, /^fastify/, /^openai$/, /^@anthropic-ai\//], why: "contracts must not depend on other packages" },
-  { dir: "packages/runtime/src", forbid: [/^@prisma\//, /^@agentos\/db$/, /^fastify/, /^@fastify\//, /^openai$/, /^@anthropic-ai\//], why: "runtime must stay independent of persistence, HTTP and provider SDKs" },
+  { dir: "packages/runtime/src", forbid: [/^@prisma\//, /^@agentos\/db$/, /^fastify/, /^@fastify\//, /^openai$/, /^@anthropic-ai\//, /^@temporalio\//], why: "runtime must stay independent of persistence, HTTP, provider SDKs and the workflow engine" },
+  {
+    dir: "packages/workflows/src/workflows",
+    forbid: [/^node:/, /^@agentos\/(db|platform|providers|tools)$/, /^@temporalio\/(client|worker|activity)$/, /^@prisma\//, /^pg$/],
+    why: "workflow code runs in Temporal's deterministic sandbox: no I/O, only @temporalio/workflow and type imports",
+  },
+  { dir: "packages/platform/src", forbid: [/^fastify/, /^@fastify\//, /^@temporalio\//, /^openai$/, /^@anthropic-ai\//], why: "platform is shared by the API and the worker: no HTTP framework or workflow engine" },
   { dir: "packages/tools/src", forbid: [/^@agentos\/(db|runtime|providers)$/, /^@prisma\//, /^fastify/, /^node:child_process$/, /^child_process$/], why: "tools must not reach persistence or spawn processes" },
   { dir: "packages/providers/src", forbid: [/^@agentos\/(db|runtime|tools)$/, /^@prisma\//, /^fastify/], why: "providers must not depend on runtime or persistence" },
   { dir: "apps/web/src", forbid: [/^@agentos\/(db|runtime|providers|tools)$/, /^@prisma\//, /^openai$/, /^@anthropic-ai\//], why: "web may only import @agentos/contracts" },

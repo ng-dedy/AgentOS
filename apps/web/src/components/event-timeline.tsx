@@ -76,6 +76,13 @@ function describe(e: RunEvent, agentName: (id: string | null) => string): Descri
         body: <p className="text-sm text-muted-foreground">{String(err.message ?? "")}{err.status ? ` (HTTP ${String(err.status)})` : ""}</p>,
       };
     }
+    case "activity.retry":
+      return {
+        icon: <RotateCcw />,
+        title: `Worker step ${String(p.activity)} retried (attempt ${String(p.attempt)})`,
+        tone: "warning",
+        body: <p className="text-sm text-muted-foreground">The previous attempt did not finish (for example its worker stopped). The step resumed from saved state.</p>,
+      };
     case "tool.requested":
       return { icon: <Wrench />, title: `Tool requested: ${String(p.toolName)}`, tone: "muted", body: <JsonView value={p.arguments} /> };
     case "tool.completed":
@@ -202,6 +209,8 @@ export function eventSummary(e: RunEvent): string {
       return `created ${String(p.kind)} task “${String(p.title)}”`;
     case "run.started":
       return "started a run";
+    case "activity.retry":
+      return `retried ${String(p.activity)} on a worker (attempt ${String(p.attempt)})`;
     default:
       return e.type;
   }

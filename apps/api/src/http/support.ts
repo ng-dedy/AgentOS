@@ -1,7 +1,7 @@
 import { createHash } from "node:crypto";
 import type { FastifyReply, FastifyRequest } from "fastify";
 import { Prisma, type PrismaClient } from "@agentos/db";
-import { jsonSafe } from "../events/bus";
+import { jsonSafe } from "@agentos/platform";
 import { AppError } from "./errors";
 
 export async function audit(
