@@ -55,6 +55,8 @@ export interface TaskRecord {
   failureCode: FailureCode | null;
   failureMessage: string | null;
   cancelRequestedAt: Date | null;
+  /** Spending limit for the whole task tree (all runs and pipeline steps), or null. */
+  maxCostUsd?: number | null;
 }
 
 export interface RunRecord {
@@ -80,6 +82,12 @@ export interface ToolCallRecord {
   status: ToolCallStatus;
   output: unknown;
   error: string | null;
+  risk?: string | null;
+}
+
+export interface AssistantTurn {
+  content: string;
+  toolCalls: ToolCallRequest[];
 }
 
 export interface ApprovalRecord {
@@ -152,7 +160,27 @@ export interface RunStore {
     patch: { status: ToolCallStatus; output?: unknown; error?: string | null; durationMs?: number },
   ): Promise<void>;
   listToolCalls(orgId: string, runId: string, status?: ToolCallStatus): Promise<ToolCallRecord[]>;
+  getToolCall(orgId: string, id: string): Promise<ToolCallRecord | null>;
+  /**
+   * Compare-and-set: apply `patch` only if the current status is one of `from`.
+   * Returns false when another execution already moved the row. This is what
+   * guarantees a tool runs at most once across retries and workers.
+   */
+  transitionToolCall(
+    orgId: string,
+    id: string,
+    from: ToolCallStatus[],
+    patch: { status: ToolCallStatus; output?: unknown; error?: string | null; durationMs?: number },
+  ): Promise<boolean>;
 
+  /** Assistant messages written by one run, oldest first: turn n is index n. */
+  getAssistantTurns(orgId: string, conversationId: string, runId: string): Promise<AssistantTurn[]>;
+  /** Whether the transcript already holds the result for this provider tool call id. */
+  hasToolResult(orgId: string, conversationId: string, providerCallId: string): Promise<boolean>;
+  /** Total estimated spend of a task tree (root plus children), in USD. */
+  getTreeSpend(orgId: string, rootTaskId: string): Promise<number>;
+
+  /** Idempotent on toolCallId: returns the existing approval if one was already created. */
   createApproval(
     orgId: string,
     input: { toolCallId: string; taskId: string; runId: string; agentId: string; toolName: string; arguments: unknown; reason: string },
@@ -163,7 +191,7 @@ export interface RunStore {
 
   recordUsage(
     orgId: string,
-    input: { runId: string; agentId: string; provider: string; model: string; inputTokens: number; outputTokens: number; cachedTokens: number; costUsd: number },
+    input: { runId: string; agentId: string; provider: string; model: string; inputTokens: number; outputTokens: number; cachedTokens: number; costUsd: number; latencyMs?: number; attempt?: number },
   ): Promise<void>;
 }
 

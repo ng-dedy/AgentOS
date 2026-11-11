@@ -65,6 +65,8 @@ export interface GenerateOptions {
   signal: AbortSignal;
   timeoutMs: number;
   onDelta?: (text: string) => void;
+  /** The calling organization's API key. Never logged; when absent the adapter's deployment key is used. */
+  apiKey?: string;
 }
 
 export interface ModelProvider {
@@ -75,7 +77,7 @@ export interface ModelProvider {
   readonly endpoint?: string;
   isConfigured(): boolean;
   /** List models available to the configured account via the provider's Models API. */
-  listModels?(signal: AbortSignal): Promise<DiscoveredModel[]>;
+  listModels?(signal: AbortSignal, apiKey?: string): Promise<DiscoveredModel[]>;
   generate(request: ModelRequest, options: GenerateOptions): Promise<ModelResponse>;
 }
 

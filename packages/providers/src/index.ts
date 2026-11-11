@@ -6,3 +6,4 @@ export { AnthropicProvider, toAnthropicMessages, fromAnthropicMessage, normalize
 export { OpenAICompatibleProvider, toOpenAIMessages, ChatStreamAccumulator, normalizeOpenAIError } from "./adapters/openaiCompatible";
 export { MockProvider, extractExpression } from "./adapters/mock";
 export { OpenAIResponsesProvider, toResponsesInput, fromResponse } from "./adapters/openaiResponses";
+export { ClientCache, keyFingerprint } from "./clientCache";

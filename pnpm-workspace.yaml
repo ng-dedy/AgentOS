@@ -8,3 +8,5 @@ onlyBuiltDependencies:
   - sharp
   - "@tailwindcss/oxide"
   - unrs-resolver
+  - "@swc/core"
+  - protobufjs

@@ -1,4 +1,5 @@
 import OpenAI from "openai";
+import { ClientCache } from "../clientCache";
 import { providerError, ProviderError, safeProviderCode, withTimeout, type ProviderErrorKind } from "../errors";
 import type {
   DiscoveredModel,
@@ -32,7 +33,7 @@ export class OpenAIResponsesProvider implements ModelProvider {
   readonly id = "openai" as const;
   readonly label = "OpenAI";
   readonly isMock = false;
-  private client: OpenAI | undefined;
+  private readonly clients = new ClientCache<OpenAI>();
 
   constructor(
     private readonly secrets: SecretsProvider,
@@ -45,15 +46,15 @@ export class OpenAIResponsesProvider implements ModelProvider {
     return this.secrets.get("OPENAI_API_KEY") !== undefined;
   }
 
-  private getClient(): OpenAI {
-    const key = this.secrets.get("OPENAI_API_KEY");
+  /** `apiKey` is the calling organization's key; without it the deployment key is used. */
+  private getClient(apiKey?: string): OpenAI {
+    const key = apiKey ?? this.secrets.get("OPENAI_API_KEY");
     if (!key) throw providerError("not_configured", this.id);
-    this.client ??= this.clientFactory(key, this.endpoint);
-    return this.client;
+    return this.clients.get(key, () => this.clientFactory(key, this.endpoint));
   }
 
-  async listModels(signal: AbortSignal): Promise<DiscoveredModel[]> {
-    const client = this.getClient();
+  async listModels(signal: AbortSignal, apiKey?: string): Promise<DiscoveredModel[]> {
+    const client = this.getClient(apiKey);
     try {
       const out: DiscoveredModel[] = [];
       for await (const m of client.models.list({ signal })) out.push({ id: m.id });
@@ -64,7 +65,7 @@ export class OpenAIResponsesProvider implements ModelProvider {
   }
 
   async generate(req: ModelRequest, opts: GenerateOptions): Promise<ModelResponse> {
-    const client = this.getClient();
+    const client = this.getClient(opts.apiKey);
     let started = false;
     try {
       return await withTimeout(this.id, opts.timeoutMs, opts.signal, async (signal) => {
