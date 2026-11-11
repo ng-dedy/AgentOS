@@ -1,26 +1,98 @@
 import type { FastifyInstance } from "fastify";
-import { SkillCreateSchema, WorkspaceUpdateSchema } from "@agentos/contracts";
+import { CredentialPutSchema, SkillCreateSchema, WorkspaceUpdateSchema } from "@agentos/contracts";
+import { isCredentialProvider } from "@agentos/platform";
+import { ProviderError } from "@agentos/providers";
 import { toJsonSchema } from "@agentos/tools";
 import type { AppDeps } from "../app";
 import { requireAuth, requireOwner } from "../auth/plugin";
 import { parse } from "../http/errors";
 import { audit, money } from "../http/support";
 import { AppError } from "../http/errors";
+import { providersForOrg } from "../providers/status";
 
 export async function settingsRoutes(app: FastifyInstance, deps: AppDeps) {
   const { prisma, providers, tools } = deps;
 
   app.get("/providers", async (req) => {
-    requireAuth(req);
-    return providers.list().map((p) => ({ ...p, discovery: deps.discovery.peek(p.id) }));
+    const { organizationId } = requireAuth(req);
+    return (await providersForOrg(deps, organizationId)).map((p) => ({ ...p, discovery: deps.discovery.peek(organizationId, p.id) }));
   });
 
-  /** Compare the catalog with the provider's Models API for this deployment's key. */
+  /** Compare the catalog with the provider's Models API, using this organization's key. */
   app.get<{ Params: { id: string }; Querystring: { refresh?: string } }>("/providers/:id/models", async (req) => {
-    requireAuth(req);
-    const result = await deps.discovery.discover(req.params.id, req.query.refresh === "1");
+    const { organizationId } = requireAuth(req);
+    const result = await deps.discovery.discover(organizationId, req.params.id, req.query.refresh === "1");
     if (!result) throw new AppError(404, "not_found", "Provider not found");
     return result;
+  });
+
+  // ---- Organization provider credentials (owner only; keys are write-only) ----
+
+  const credentialProvider = (raw: string) => {
+    if (!isCredentialProvider(raw)) throw new AppError(404, "not_found", "Unknown provider");
+    return raw;
+  };
+
+  app.get("/credentials", async (req) => {
+    const { organizationId } = requireAuth(req);
+    return {
+      storage: {
+        enabled: deps.credentials.enabled,
+        kms: deps.credentials.kmsName,
+        developmentOnly: deps.credentials.kmsDevelopmentOnly,
+      },
+      allowDeploymentKeys: deps.config.AGENTOS_ALLOW_DEPLOYMENT_KEYS,
+      items: await deps.credentials.list(organizationId),
+    };
+  });
+
+  app.put<{ Params: { provider: string } }>("/credentials/:provider", { config: { rateLimit: { max: 20, timeWindow: "1 minute" } } }, async (req) => {
+    const auth = requireOwner(req);
+    const provider = credentialProvider(req.params.provider);
+    const body = parse(CredentialPutSchema, req.body);
+    if (!deps.credentials.enabled) throw new AppError(503, "credentials_unavailable", "Credential storage is not configured on this server");
+    const adapter = providers.get(provider);
+    // Check the key before storing it. A key the provider rejects is never saved.
+    let check: { ok: boolean; error: string | null } = { ok: false, error: null };
+    if (body.verify !== false && adapter?.listModels) {
+      try {
+        await adapter.listModels(AbortSignal.timeout(15_000), body.apiKey);
+        check = { ok: true, error: null };
+      } catch (err) {
+        if (err instanceof ProviderError && err.kind === "auth") {
+          throw new AppError(422, "credential_rejected", `${adapter.label} rejected this key (${err.code})`);
+        }
+        check = { ok: false, error: err instanceof ProviderError ? `${err.code}: ${err.message}` : "Connection check failed" };
+      }
+    }
+    const { created } = await deps.credentials.put(auth.organizationId, provider, body.apiKey, { userId: auth.userId });
+    if (check.ok || check.error) {
+      await prisma.providerCredential.updateMany({
+        where: { organizationId: auth.organizationId, provider },
+        data: { status: check.ok ? "valid" : "unverified", lastVerifiedAt: new Date(), lastVerifyError: check.error },
+      });
+    }
+    deps.discovery.invalidate(auth.organizationId, provider);
+    const item = (await deps.credentials.list(auth.organizationId)).find((c) => c.provider === provider)!;
+    return { created, credential: item };
+  });
+
+  app.post<{ Params: { provider: string } }>("/credentials/:provider/verify", { config: { rateLimit: { max: 20, timeWindow: "1 minute" } } }, async (req) => {
+    const auth = requireOwner(req);
+    const provider = credentialProvider(req.params.provider);
+    const result = await deps.credentials.verify(auth.organizationId, provider, providers, { userId: auth.userId });
+    deps.discovery.invalidate(auth.organizationId, provider);
+    const item = (await deps.credentials.list(auth.organizationId)).find((c) => c.provider === provider)!;
+    return { result, credential: item };
+  });
+
+  app.delete<{ Params: { provider: string } }>("/credentials/:provider", async (req, reply) => {
+    const auth = requireOwner(req);
+    const provider = credentialProvider(req.params.provider);
+    const deleted = await deps.credentials.delete(auth.organizationId, provider, { userId: auth.userId });
+    deps.discovery.invalidate(auth.organizationId, provider);
+    if (!deleted) throw new AppError(404, "not_found", "No credential stored for this provider");
+    return reply.status(204).send();
   });
 
   app.get("/tools", async (req) => {

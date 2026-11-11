@@ -42,7 +42,7 @@ describe("credential handling", () => {
         cb();
       },
     });
-    const config = ConfigSchema.parse({ DATABASE_URL: TEST_DB, AGENTOS_ENABLE_MOCK_PROVIDER: "true", LOG_LEVEL: "debug" });
+    const config = ConfigSchema.parse({ DATABASE_URL: TEST_DB, AGENTOS_ENABLE_MOCK_PROVIDER: "true", LOG_LEVEL: "debug", AGENTOS_ALLOW_DEPLOYMENT_KEYS: "true" });
     const secrets = { get: (k: string) => (k === "OPENAI_API_KEY" ? CANARY : undefined) };
     const { app, deps } = await buildApp({
       prisma: db(),
@@ -58,7 +58,7 @@ describe("credential handling", () => {
       expect(agent.status).toBe(201);
       const created = await api(app, s).post("/tasks", { kind: "single", agentId: agent.body.id, title: "t", instruction: "What is 2 + 2?" });
       expect(created.status).toBe(201);
-      await deps.workflow.idle();
+      await deps.workflow.idle?.();
 
       // The key was sent only to the configured endpoint…
       expect(seenAuth).toEqual([`Bearer ${CANARY}`]);

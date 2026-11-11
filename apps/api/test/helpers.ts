@@ -1,6 +1,7 @@
 import type { FastifyInstance } from "fastify";
 import { createPrismaClient, type PrismaClient } from "@agentos/db";
-import type { SecretsProvider } from "@agentos/providers";
+import type { KeyManagementService } from "@agentos/platform";
+import type { ProviderRegistry, SecretsProvider } from "@agentos/providers";
 import { buildApp, type AppDeps } from "../src/app";
 import { ConfigSchema } from "../src/config";
 
@@ -19,7 +20,11 @@ export async function resetDb() {
   await db().$executeRawUnsafe(`TRUNCATE ${tables.map((t) => `"${t.tablename}"`).join(", ")} CASCADE`);
 }
 
-export async function makeApp(overrides: Record<string, string> = {}, secrets?: SecretsProvider): Promise<{ app: FastifyInstance; deps: AppDeps }> {
+export async function makeApp(
+  overrides: Record<string, string> = {},
+  secrets?: SecretsProvider,
+  extra: { kms?: KeyManagementService | null; providers?: ProviderRegistry; listen?: boolean } = {},
+): Promise<{ app: FastifyInstance; deps: AppDeps }> {
   const config = ConfigSchema.parse({
     DATABASE_URL: TEST_DB,
     AGENTOS_ENABLE_MOCK_PROVIDER: "true",
@@ -33,6 +38,9 @@ export async function makeApp(overrides: Record<string, string> = {}, secrets?: 
     logger: false,
     secrets: secrets ?? { get: () => undefined },
     engineOverrides: { retryBaseDelayMs: 0 },
+    kms: extra.kms === undefined ? null : extra.kms,
+    providers: extra.providers,
+    listen: extra.listen,
   });
 }
 
@@ -57,7 +65,7 @@ export async function signup(app: FastifyInstance, org = "Acme"): Promise<Sessio
 }
 
 export function api(app: FastifyInstance, s: Session) {
-  const call = async (method: "GET" | "POST" | "PATCH", url: string, payload?: unknown, headers: Record<string, string> = {}) => {
+  const call = async (method: "GET" | "POST" | "PATCH" | "PUT" | "DELETE", url: string, payload?: unknown, headers: Record<string, string> = {}) => {
     const res = await app.inject({ method, url: `/api/v1${url}`, payload: payload as object, headers: { cookie: s.cookie, ...headers } });
     return { status: res.statusCode, body: res.body ? (res.json() as any) : null, headers: res.headers }; // eslint-disable-line @typescript-eslint/no-explicit-any
   };
@@ -65,6 +73,7 @@ export function api(app: FastifyInstance, s: Session) {
     get: (url: string) => call("GET", url),
     post: (url: string, payload?: unknown, headers?: Record<string, string>) => call("POST", url, payload ?? {}, headers),
     patch: (url: string, payload: unknown) => call("PATCH", url, payload),
+    put: (url: string, payload: unknown) => call("PUT", url, payload),
   };
 }
 

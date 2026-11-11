@@ -1,4 +1,5 @@
 import { ProviderError, type ProviderRegistry } from "@agentos/providers";
+import type { CredentialResolver } from "@agentos/runtime";
 
 export interface ModelDiscovery {
   provider: string;
@@ -13,7 +14,8 @@ export interface ModelDiscovery {
 }
 
 /**
- * Checks the catalog against each provider's Models API. Results are cached so the
+ * Checks the catalog against each provider's Models API, using the calling
+ * organization's own credential. Results are cached per organization so the
  * settings page does not call the provider on every load.
  */
 export class ModelDiscoveryService {
@@ -21,22 +23,30 @@ export class ModelDiscoveryService {
 
   constructor(
     private readonly providers: ProviderRegistry,
+    private readonly credentials: CredentialResolver,
     private readonly ttlMs = 5 * 60_000,
     private readonly timeoutMs = 15_000,
   ) {}
 
-  peek(providerId: string): ModelDiscovery | null {
-    return this.cache.get(providerId)?.value ?? null;
+  peek(orgId: string, providerId: string): ModelDiscovery | null {
+    return this.cache.get(`${orgId}|${providerId}`)?.value ?? null;
   }
 
-  async discover(providerId: string, force = false): Promise<ModelDiscovery | null> {
+  /** Forget cached results for an organization (after its credential changes). */
+  invalidate(orgId: string, providerId: string) {
+    this.cache.delete(`${orgId}|${providerId}`);
+  }
+
+  async discover(orgId: string, providerId: string, force = false): Promise<ModelDiscovery | null> {
     const provider = this.providers.get(providerId);
     if (!provider) return null;
-    const cached = this.cache.get(providerId);
+    const cacheKey = `${orgId}|${providerId}`;
+    const cached = this.cache.get(cacheKey);
     if (!force && cached && Date.now() - cached.at < this.ttlMs) return cached.value;
 
     const catalog = this.providers.catalog.forProvider(provider.id);
     let value: ModelDiscovery;
+    let apiKey: string | undefined;
     if (provider.isMock || !provider.listModels) {
       value = {
         provider: provider.id,
@@ -46,18 +56,18 @@ export class ModelDiscoveryService {
         catalog: catalog.map((m) => ({ id: m.id, label: m.label, availableOnAccount: provider.isMock ? true : null, priceSource: m.priceSource })),
         listedCount: catalog.length,
       };
-    } else if (!provider.isConfigured()) {
+    } else if (!(apiKey = (await this.credentials.resolve(orgId, provider.id)) ?? undefined)) {
       value = {
         provider: provider.id,
         checkedAt: new Date().toISOString(),
         ok: false,
-        error: { code: "PROVIDER_NOT_CONFIGURED", message: "Provider is not configured" },
+        error: { code: "PROVIDER_NOT_CONFIGURED", message: "No key is configured for this organization" },
         catalog: catalog.map((m) => ({ id: m.id, label: m.label, availableOnAccount: null, priceSource: m.priceSource })),
         listedCount: 0,
       };
     } else {
       try {
-        const listed = await provider.listModels(AbortSignal.timeout(this.timeoutMs));
+        const listed = await provider.listModels(AbortSignal.timeout(this.timeoutMs), apiKey);
         const ids = new Set(listed.map((m) => m.id));
         value = {
           provider: provider.id,
@@ -79,7 +89,7 @@ export class ModelDiscoveryService {
         };
       }
     }
-    this.cache.set(providerId, { at: Date.now(), value });
+    this.cache.set(cacheKey, { at: Date.now(), value });
     return value;
   }
 }

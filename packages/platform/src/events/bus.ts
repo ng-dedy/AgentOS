@@ -5,12 +5,15 @@ import type { EventSink, NewEvent } from "@agentos/runtime";
 type Listener = (event: RunEvent) => void;
 
 /**
- * In-process pub/sub keyed by organization. Correctness never depends on it:
- * every persisted event can be replayed from the database. Multi-instance
- * deployments need Postgres LISTEN/NOTIFY or Redis here (see risk R5).
+ * Per-process pub/sub keyed by organization. Correctness never depends on it:
+ * every persisted event can be replayed from the database. Across processes it is
+ * fed by `PgEventListener` (Postgres LISTEN/NOTIFY), so an event written by a worker
+ * or another API instance reaches every instance. A persisted event can arrive twice
+ * (local publish and NOTIFY); the bus drops repeats by seq.
  */
 export class EventBus {
   private readonly listeners = new Map<string, Set<Listener>>();
+  private readonly recent = new Set<string>();
 
   subscribe(orgId: string, listener: Listener): () => void {
     let set = this.listeners.get(orgId);
@@ -26,6 +29,11 @@ export class EventBus {
   }
 
   publish(orgId: string, event: RunEvent) {
+    if (event.seq !== null) {
+      if (this.recent.has(event.seq)) return;
+      this.recent.add(event.seq);
+      if (this.recent.size > 20_000) this.recent.delete(this.recent.values().next().value!);
+    }
     for (const l of this.listeners.get(orgId) ?? []) {
       try {
         l(event);
@@ -37,6 +45,11 @@ export class EventBus {
 
   listenerCount(orgId: string): number {
     return this.listeners.get(orgId)?.size ?? 0;
+  }
+
+  /** Organizations with at least one live subscriber in this process. */
+  activeOrgs(): string[] {
+    return [...this.listeners.keys()];
   }
 }
 
@@ -62,13 +75,27 @@ export function toRunEvent(row: {
   };
 }
 
-/** Persist-then-publish sink used by the runtime. */
+/** Channel for live-only events (model deltas) between processes. */
+export const TRANSIENT_CHANNEL = "agentos_transient";
+/** Channel the RunEvent insert trigger notifies on (see the durable_execution migration). */
+export const EVENTS_CHANNEL = "agentos_events";
+/** NOTIFY payloads must stay under 8000 bytes; leave room for the envelope. */
+const MAX_TRANSIENT_TEXT = 3000;
+
+/**
+ * Persist-then-publish sink used by the runtime. Persisted events reach other
+ * processes through the database trigger; live-only deltas are sent with
+ * `pg_notify` when `crossProcess` is on (worker processes).
+ */
 export class PrismaEventSink implements EventSink {
   private readonly roots = new Map<string, string>();
+  /** Serializes NOTIFY calls so deltas arrive in order. */
+  private notifyChain: Promise<unknown> = Promise.resolve();
 
   constructor(
     private readonly prisma: PrismaClient,
     private readonly bus: EventBus,
+    private readonly opts: { crossProcess?: boolean } = {},
   ) {}
 
   private async rootOf(orgId: string, taskId: string): Promise<string> {
@@ -99,7 +126,7 @@ export class PrismaEventSink implements EventSink {
 
   emitTransient(e: NewEvent): void {
     const rootTaskId = this.roots.get(e.taskId) ?? e.taskId;
-    this.bus.publish(e.organizationId, {
+    const event: RunEvent = {
       seq: null,
       type: e.type,
       taskId: e.taskId,
@@ -108,11 +135,33 @@ export class PrismaEventSink implements EventSink {
       agentId: e.agentId,
       payload: e.payload,
       createdAt: new Date().toISOString(),
-    });
+    };
+    this.bus.publish(e.organizationId, event);
+    if (!this.opts.crossProcess) return;
+    for (const part of splitTransient(event)) {
+      const msg = JSON.stringify({ o: e.organizationId, e: part });
+      this.notifyChain = this.notifyChain
+        .then(() => this.prisma.$executeRaw`SELECT pg_notify(${TRANSIENT_CHANNEL}, ${msg})`)
+        .catch(() => undefined); // live deltas are best-effort; the persisted model.output is authoritative
+    }
+  }
+
+  /** Wait for queued NOTIFYs (tests and shutdown). */
+  async flush(): Promise<void> {
+    await this.notifyChain;
   }
 }
 
 // eslint-disable-next-line @typescript-eslint/no-explicit-any -- Prisma JSON input type
 export function jsonSafe(v: unknown): any {
   return JSON.parse(JSON.stringify(v ?? null)) ?? {};
+}
+
+/** Split a large delta into several NOTIFY-sized deltas. */
+function splitTransient(e: RunEvent): RunEvent[] {
+  const text = typeof e.payload.text === "string" ? e.payload.text : null;
+  if (text === null || text.length <= MAX_TRANSIENT_TEXT) return [e];
+  const out: RunEvent[] = [];
+  for (let i = 0; i < text.length; i += MAX_TRANSIENT_TEXT) out.push({ ...e, payload: { ...e.payload, text: text.slice(i, i + MAX_TRANSIENT_TEXT) } });
+  return out;
 }

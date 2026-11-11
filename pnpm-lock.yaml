@@ -41,6 +41,9 @@ importers:
       '@agentos/db':
         specifier: workspace:*
         version: link:../../packages/db
+      '@agentos/platform':
+        specifier: workspace:*
+        version: link:../../packages/platform
       '@agentos/providers':
         specifier: workspace:*
         version: link:../../packages/providers
@@ -50,6 +53,9 @@ importers:
       '@agentos/tools':
         specifier: workspace:*
         version: link:../../packages/tools
+      '@agentos/workflows':
+        specifier: workspace:*
+        version: link:../../packages/workflows
       '@fastify/cookie':
         specifier: 11.1.5
         version: 11.1.5
@@ -112,6 +118,34 @@ importers:
         specifier: 4.3.5
         version: 4.3.5
 
+  apps/worker:
+    dependencies:
+      '@agentos/db':
+        specifier: workspace:*
+        version: link:../../packages/db
+      '@agentos/platform':
+        specifier: workspace:*
+        version: link:../../packages/platform
+      '@agentos/workflows':
+        specifier: workspace:*
+        version: link:../../packages/workflows
+      pino:
+        specifier: 10.4.0
+        version: 10.4.0
+      tsx:
+        specifier: 4.23.15
+        version: 4.23.15
+      zod:
+        specifier: 4.6.7
+        version: 4.6.7
+    devDependencies:
+      '@temporalio/client':
+        specifier: 1.25.0
+        version: 1.25.0(long@5.3.2)(protobufjs@8.8.1)
+      '@temporalio/worker':
+        specifier: 1.25.0
+        version: 1.25.0(@swc/helpers@0.5.23)(esbuild@0.28.2)(long@5.3.2)(protobufjs@8.8.1)
+
   packages/contracts:
     dependencies:
       zod:
@@ -136,6 +170,34 @@ importers:
       prisma:
         specifier: 7.10.1
         version: 7.10.1(@types/node@22.20.5)(@types/react-dom@19.3.0(@types/react@19.3.0))(@types/react@19.3.0)(react-dom@19.3.1(react@19.3.1))(react@19.3.1)(typescript@5.9.3)
+
+  packages/platform:
+    dependencies:
+      '@agentos/contracts':
+        specifier: workspace:*
+        version: link:../contracts
+      '@agentos/db':
+        specifier: workspace:*
+        version: link:../db
+      '@agentos/providers':
+        specifier: workspace:*
+        version: link:../providers
+      '@agentos/runtime':
+        specifier: workspace:*
+        version: link:../runtime
+      '@agentos/tools':
+        specifier: workspace:*
+        version: link:../tools
+      pg:
+        specifier: 8.23.1
+        version: 8.23.1
+      zod:
+        specifier: 4.6.7
+        version: 4.6.7
+    devDependencies:
+      '@types/pg':
+        specifier: 8.23.1
+        version: 8.23.1
 
   packages/providers:
     dependencies:

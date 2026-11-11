@@ -399,12 +399,12 @@ export class AgentEngine {
   }
 
   /** Fail a run for a reason decided by the coordinator (e.g. the tool-failure loop guard). */
-  async failRun(orgId: string, taskId: string, runId: string | null, code: FailureCode, message: string): Promise<TerminalOutcome> {
+  async failRun(orgId: string, taskId: string, runId: string | null, code: FailureCode, message: string, detail?: Record<string, unknown>): Promise<TerminalOutcome> {
     const task = await this.mustGetTask(orgId, taskId);
     const terminal = this.terminalOutcome(task);
     if (terminal) return terminal;
-    const run = runId ? await this.opts.store.getRun(orgId, runId) : null;
-    return this.failTask(task, run, code, message);
+    const run = runId ? await this.opts.store.getRun(orgId, runId) : await this.opts.store.getLatestRun(orgId, taskId);
+    return this.failTask(task, run && (run.status === "running" || run.status === "awaiting_approval") ? run : null, code, message, detail);
   }
 
   /** Finalize a task as cancelled (run, approvals, events). Idempotent. */

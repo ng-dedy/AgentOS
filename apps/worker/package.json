@@ -1,0 +1,24 @@
+{
+  "name": "@agentos/worker",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "tsx --env-file-if-exists=../../.env src/main.ts",
+    "start": "tsx --env-file-if-exists=../../.env src/main.ts",
+    "typecheck": "tsc -p tsconfig.json",
+    "test:durability": "vitest run"
+  },
+  "dependencies": {
+    "@agentos/db": "workspace:*",
+    "@agentos/platform": "workspace:*",
+    "@agentos/workflows": "workspace:*",
+    "pino": "10.4.0",
+    "zod": "4.6.7",
+    "tsx": "4.23.15"
+  },
+  "devDependencies": {
+    "@temporalio/client": "1.25.0",
+    "@temporalio/worker": "1.25.0"
+  }
+}
