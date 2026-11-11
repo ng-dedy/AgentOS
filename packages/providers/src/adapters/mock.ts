@@ -16,6 +16,8 @@ import type { GenerateOptions, ModelMessage, ModelProvider, ModelRequest, ModelR
  *   [mock:slow]           wait ~3s before answering (cancellation)
  *   [mock:error=<kind>]   throw a normalized provider error (e.g. rate_limit, auth)
  *   [mock:approval]       call the approval-gated mock_external_action tool
+ *   [mock:repeat_bad_tool] keep requesting a disallowed tool (failed-tool loop guard)
+ *   [mock:refusal]        return a refusal stop reason
  */
 export class MockProvider implements ModelProvider {
   readonly id = "mock" as const;
@@ -46,6 +48,18 @@ export class MockProvider implements ModelProvider {
     const call = (name: string, args: unknown): ModelResponse => this.toolResponse(req, { id: this.nextId(), name, arguments: args });
 
     if (instruction.includes("[mock:loop]")) return call("calculator", { expression: `${toolResults.length} + 1` });
+    // Keeps asking for a tool it is not allowed to use, to exercise the failed-tool loop guard.
+    if (instruction.includes("[mock:repeat_bad_tool]")) return call("shell_exec", { command: "id" });
+    if (instruction.includes("[mock:refusal]")) {
+      return {
+        text: "",
+        toolCalls: [],
+        stopReason: "refusal",
+        refusal: "MOCK refusal for testing",
+        usage: { inputTokens: 5, outputTokens: 1, cachedInputTokens: 0 },
+        servedModel: req.model,
+      };
+    }
 
     if (toolResults.length === 0) {
       if (instruction.includes("[mock:unknown_tool]")) return call("shell_exec", { command: "cat /etc/passwd" });

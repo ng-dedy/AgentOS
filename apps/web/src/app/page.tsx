@@ -60,13 +60,31 @@ export default function DashboardPage() {
               label="Estimated spend"
               value={formatUsd(dash.data.usage.costUsd)}
               icon={<CircleDollarSign />}
-              hint={`${formatNumber(dash.data.usage.inputTokens + dash.data.usage.outputTokens)} tokens · ${dash.data.usage.modelCalls} calls`}
+              hint={`${formatNumber(dash.data.usage.inputTokens + dash.data.usage.outputTokens)} tokens · ${dash.data.usage.live.modelCalls} live / ${dash.data.usage.mock.modelCalls} mock calls`}
             />
           </>
         ) : (
           Array.from({ length: 5 }, (_, i) => <Skeleton key={i} className="h-24" />)
         )}
       </div>
+
+      {dash.data ? (
+        <div className="mt-3 flex flex-wrap items-center gap-2 text-xs text-muted-foreground" data-testid="provider-strip">
+          <span>Providers:</span>
+          {dash.data.providers.map((p) =>
+            p.isMock ? (
+              <MockBadge key={p.id} />
+            ) : (
+              <Badge key={p.id} variant={p.configured ? "success" : "secondary"} data-provider={p.id}>
+                {p.label}: {p.configured ? "key set" : "not configured"}
+              </Badge>
+            ),
+          )}
+          <Link href="/settings" className="text-primary hover:underline">
+            Check accounts
+          </Link>
+        </div>
+      ) : null}
 
       <div className="mt-6 grid gap-6 lg:grid-cols-5 [&>*]:min-w-0">
         <div className="flex flex-col gap-6 lg:col-span-3">

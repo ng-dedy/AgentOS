@@ -23,7 +23,8 @@ export default function TaskDetailPage() {
   const { events, state } = useEventStream(`/tasks/${id}/events/stream`, {
     onDelta: (e) => setLive((s) => s + String((e.payload as { text: string }).text)),
     onEvent: (e) => {
-      if (e.type === "model.output") setLive("");
+      // A retry discards the partial text streamed by the failed attempt.
+      if (e.type === "model.output" || e.type === "model.retry") setLive("");
       if (["task.status", "tool.completed", "tool.rejected", "approval.required", "approval.decided", "agent.handoff", "run.completed", "run.failed", "run.cancelled"].includes(e.type)) {
         void task.reload();
       }
@@ -60,7 +61,7 @@ export default function TaskDetailPage() {
           <div className="mb-1 flex flex-wrap items-center gap-2">
             <StatusBadge status={t.status} />
             <Badge variant="secondary">{t.kind === "pipeline" ? "Two-agent pipeline" : "Single agent"}</Badge>
-            {isMock ? <MockBadge /> : null}
+            {isMock ? <MockBadge /> : t.runs.length ? <Badge variant="success" data-testid="live-badge">Live provider</Badge> : null}
           </div>
           <h1 className="text-xl font-semibold tracking-tight" data-testid="task-title">
             {t.title}
@@ -204,15 +205,21 @@ export default function TaskDetailPage() {
                     <span className="font-medium">{r.agentName}</span>
                     <StatusBadge status={r.status} />
                   </div>
-                  <div className="mt-1 font-mono text-xs text-muted-foreground">
+                  <div className="mt-1 flex flex-wrap items-center gap-2 font-mono text-xs text-muted-foreground">
                     {r.provider}/{r.model}
+                    {r.isMock ? <MockBadge /> : <Badge variant="success">LIVE</Badge>}
                   </div>
                   <div className="mt-2 grid grid-cols-3 gap-2 text-xs text-muted-foreground">
                     <span>{r.iterations} iterations</span>
                     <span>{formatNumber(r.inputTokens + r.outputTokens)} tok</span>
-                    <span>{formatUsd(r.costUsd)}</span>
+                    <span title="Estimated from provider-reported tokens and the price catalog">est. {formatUsd(r.costUsd)}</span>
                   </div>
-                  {r.failureMessage ? <p className="mt-2 text-xs text-destructive">{r.failureMessage}</p> : null}
+                  {r.failureMessage ? (
+                    <p className="mt-2 text-xs text-destructive">
+                      {r.failureCode ? <span className="font-mono">{r.failureCode}: </span> : null}
+                      {r.failureMessage}
+                    </p>
+                  ) : null}
                 </div>
               ))}
               {t.runs.length ? (

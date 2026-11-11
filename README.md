@@ -2,7 +2,7 @@
 
 An operating system for an AI workforce: create agents, give them models, tools and limits, run tasks, watch execution live, approve sensitive actions, and track cost.
 
-This is **milestone 1**: the foundation plus one verified vertical slice. See `docs/` for the architecture, API contract, plan and risk register, and `AGENTS.md` for engineering standards.
+Milestones: **1** (foundation and first vertical slice) and **2A** (real provider integration, live-verified on OpenAI and Anthropic). See `docs/` for the architecture, API contract, plan and risk register, and `AGENTS.md` for engineering standards.
 
 ## What works
 
@@ -33,17 +33,21 @@ Open http://localhost:3000.
 
 | Provider | Env var | Notes |
 |---|---|---|
-| OpenAI | `OPENAI_API_KEY` | Official `openai` SDK, Chat Completions + tools |
-| Anthropic | `ANTHROPIC_API_KEY` | Official `@anthropic-ai/sdk`, Messages API streaming |
-| xAI Grok | `XAI_API_KEY` | Official `openai` SDK with `https://api.x.ai/v1` |
+| OpenAI | `OPENAI_API_KEY` | Official `openai` SDK, **Responses API** (stateless, encrypted reasoning replay). Live-verified 2026-11-11 |
+| Anthropic | `ANTHROPIC_API_KEY` | Official `@anthropic-ai/sdk`, Messages API streaming. Live-verified 2026-11-11 |
+| xAI Grok | `XAI_API_KEY` | Official `openai` SDK, Chat Completions at `https://api.x.ai/v1`. **Not live-verified** (no key) |
 | MOCK | `AGENTOS_ENABLE_MOCK_PROVIDER=true` | Scripted test double, **not an AI model**, always labelled in the UI |
 
-A provider without a key is shown as "Not configured" and cannot run tasks. Models and prices live in `packages/providers/src/catalog.ts` and can be overridden with `AGENTOS_MODEL_CATALOG_JSON`.
+A provider without a key is shown as "Not configured" and cannot run tasks. Settings → **Check account** asks the provider's Models API which catalog models your key can use. Models and published prices live in `packages/providers/src/catalog.ts` and can be overridden with `AGENTOS_MODEL_CATALOG_JSON`. Costs are estimates. See `docs/providers.md`.
 
 ## Verify
 
 ```bash
 pnpm typecheck && pnpm lint && pnpm test && pnpm test:e2e
+
+# Live provider checks (real API calls, fractions of a cent per run)
+AGENTOS_LIVE_TESTS=1 OPENAI_API_KEY=… ANTHROPIC_API_KEY=… pnpm test:live
+AGENTOS_LIVE_TESTS=1 OPENAI_API_KEY=… pnpm test:e2e:live
 ```
 
 ## Layout

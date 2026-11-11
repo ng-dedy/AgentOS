@@ -17,6 +17,20 @@ import { conversationRoutes } from "./routes/conversations";
 import { settingsRoutes } from "./routes/settings";
 import { taskRoutes } from "./routes/tasks";
 import { PrismaRunStore } from "./store/prismaStore";
+import { ModelDiscoveryService } from "./providers/discovery";
+
+/** Log fields that could carry credentials. Pino replaces them with "[Redacted]". */
+export const LOG_REDACT_PATHS = [
+  "req.headers.cookie",
+  "req.headers.authorization",
+  'req.headers["x-api-key"]',
+  "*.apiKey",
+  "*.api_key",
+  "*.authorization",
+  "err.headers",
+  "err.request",
+  "err.config",
+];
 
 export interface AppDeps {
   prisma: PrismaClient;
@@ -28,6 +42,7 @@ export interface AppDeps {
   store: PrismaRunStore;
   engine: AgentEngine;
   workflow: InProcessWorkflowEngine;
+  discovery: ModelDiscoveryService;
 }
 
 export interface BuildOptions {
@@ -42,7 +57,7 @@ export interface BuildOptions {
 export async function buildApp(opts: BuildOptions): Promise<{ app: FastifyInstance; deps: AppDeps }> {
   const { prisma, config } = opts;
   const app = Fastify({
-    logger: opts.logger ?? { level: config.LOG_LEVEL, redact: ["req.headers.cookie", "req.headers.authorization"] },
+    logger: opts.logger ?? { level: config.LOG_LEVEL, redact: LOG_REDACT_PATHS },
     bodyLimit: 1024 * 1024,
     trustProxy: false,
   });
@@ -53,6 +68,11 @@ export async function buildApp(opts: BuildOptions): Promise<{ app: FastifyInstan
       secrets: opts.secrets,
       enableMock: config.AGENTOS_ENABLE_MOCK_PROVIDER,
       catalogJson: config.AGENTOS_MODEL_CATALOG_JSON,
+      endpoints: {
+        openai: config.AGENTOS_OPENAI_BASE_URL,
+        anthropic: config.AGENTOS_ANTHROPIC_BASE_URL,
+        xai: config.AGENTOS_XAI_BASE_URL,
+      },
     });
   const tools = createDefaultToolRegistry();
   const bus = new EventBus();
@@ -65,10 +85,12 @@ export async function buildApp(opts: BuildOptions): Promise<{ app: FastifyInstan
     tools,
     logger: app.log,
     retryBaseDelayMs: opts.engineOverrides?.retryBaseDelayMs,
-    providerTimeoutMs: opts.engineOverrides?.providerTimeoutMs,
+    providerTimeoutMs: opts.engineOverrides?.providerTimeoutMs ?? config.PROVIDER_TIMEOUT_MS,
+    providerRetries: config.PROVIDER_MAX_RETRIES,
   });
   const workflow = new InProcessWorkflowEngine(engine, store, sink, app.log);
-  const deps: AppDeps = { prisma, config, providers, tools, bus, sink, store, engine, workflow };
+  const discovery = new ModelDiscoveryService(providers);
+  const deps: AppDeps = { prisma, config, providers, tools, bus, sink, store, engine, workflow, discovery };
 
   registerErrorHandler(app);
   await app.register(cookie);

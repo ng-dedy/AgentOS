@@ -32,6 +32,8 @@ export interface ModelUsage {
   inputTokens: number;
   outputTokens: number;
   cachedInputTokens: number;
+  /** Hidden reasoning tokens, already included in outputTokens (billed as output). */
+  reasoningTokens?: number;
 }
 
 export type StopReason = "end" | "tool_use" | "max_tokens" | "refusal" | "other";
@@ -43,6 +45,20 @@ export interface ModelResponse {
   usage: ModelUsage;
   /** Opaque provider data needed to replay this assistant turn verbatim. */
   providerState?: unknown;
+  /** Refusal explanation from the provider, when stopReason is "refusal". */
+  refusal?: string;
+  /** Model id the provider reports it actually used (may be a dated snapshot of the requested id). */
+  servedModel?: string;
+  /** Provider request id, for support and log correlation. */
+  requestId?: string;
+}
+
+/** A model as reported by the provider's own Models API. */
+export interface DiscoveredModel {
+  id: string;
+  label?: string;
+  maxInputTokens?: number;
+  maxOutputTokens?: number;
 }
 
 export interface GenerateOptions {
@@ -55,7 +71,11 @@ export interface ModelProvider {
   readonly id: ProviderId;
   readonly label: string;
   readonly isMock: boolean;
+  /** API base URL requests are sent to (never contains credentials). Undefined for the mock. */
+  readonly endpoint?: string;
   isConfigured(): boolean;
+  /** List models available to the configured account via the provider's Models API. */
+  listModels?(signal: AbortSignal): Promise<DiscoveredModel[]>;
   generate(request: ModelRequest, options: GenerateOptions): Promise<ModelResponse>;
 }
 

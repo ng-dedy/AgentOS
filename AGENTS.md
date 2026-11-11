@@ -53,6 +53,8 @@ See `docs/package-map.md`. Enforced by `node scripts/check-boundaries.mjs` (part
 * Never treat a model's claim that something happened as evidence. Evidence is a `ToolCall` row with `status = succeeded`.
 * No shell, arbitrary HTTP, filesystem or credential tools in milestone 1.
 * Side-effecting POSTs support `Idempotency-Key`. Tool calls are unique per `(runId, providerCallId)`.
+* Provider adapters must pass an explicit `baseURL` to their SDK. SDKs read `OPENAI_BASE_URL` / `ANTHROPIC_BASE_URL` from the environment by default, which can send keys to an unintended host.
+* Catalog prices must come from the provider's published price list with `priceSourceUrl` and `priceCheckedAt`; never invent model ids or prices. Costs are always shown as estimates.
 * The MOCK provider is a scripted test double. It must stay visibly labelled everywhere it appears and must never be presented as an AI model.
 
 ## Testing requirements
@@ -60,6 +62,7 @@ See `docs/package-map.md`. Enforced by `node scripts/check-boundaries.mjs` (part
 * Unit tests (Vitest) for tools, providers and runtime use in-memory fakes (`MemoryRunStore`, `MockProvider`).
 * API integration tests run against a real PostgreSQL database (`TEST_DATABASE_URL`, name must end in `_test`).
 * Playwright covers the primary user workflow end to end against the real API and production web build.
+* Live provider tests (`pnpm test:live`, `pnpm test:e2e:live`) call real APIs and cost money. They are skipped unless `AGENTOS_LIVE_TESTS=1` and the provider key is set. Never mark a provider "verified" without a passing live run, and never print or commit keys from them.
 * Every significant feature ships with automated tests. Do not skip, disable or loosen a test to get green.
 
 ## Verification procedure

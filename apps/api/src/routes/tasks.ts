@@ -245,12 +245,19 @@ export async function taskRoutes(app: FastifyInstance, deps: AppDeps) {
 
   app.get("/dashboard", async (req) => {
     const { organizationId } = requireAuth(req);
-    const [byStatus, agents, usage, pendingApprovals] = await Promise.all([
+    const [byStatus, agents, usage, pendingApprovals, byProvider] = await Promise.all([
       prisma.task.groupBy({ by: ["status"], where: { organizationId, parentTaskId: null }, _count: true }),
       prisma.agent.count({ where: { organizationId } }),
       prisma.usageRecord.aggregate({ where: { organizationId }, _sum: { costUsd: true, inputTokens: true, outputTokens: true }, _count: true }),
       prisma.approval.count({ where: { organizationId, status: "pending" } }),
+      prisma.usageRecord.groupBy({ by: ["provider"], where: { organizationId }, _sum: { costUsd: true }, _count: true }),
     ]);
+    const split = { live: { modelCalls: 0, costUsd: 0 }, mock: { modelCalls: 0, costUsd: 0 } };
+    for (const r of byProvider) {
+      const bucket = deps.providers.get(r.provider)?.isMock ? split.mock : split.live;
+      bucket.modelCalls += r._count;
+      bucket.costUsd += money(r._sum.costUsd);
+    }
     const counts = Object.fromEntries(byStatus.map((r) => [r.status, r._count]));
     return {
       agents,
@@ -266,7 +273,9 @@ export async function taskRoutes(app: FastifyInstance, deps: AppDeps) {
         costUsd: money(usage._sum.costUsd),
         inputTokens: usage._sum.inputTokens ?? 0,
         outputTokens: usage._sum.outputTokens ?? 0,
+        ...split,
       },
+      providers: deps.providers.list().map((p) => ({ id: p.id, label: p.label, configured: p.configured, isMock: p.isMock })),
     };
   });
 }

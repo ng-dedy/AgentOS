@@ -5,6 +5,11 @@ const bool = z
   .optional()
   .transform((v) => v === "true" || v === "1");
 
+const httpsUrl = z
+  .string()
+  .url()
+  .refine((u) => new URL(u).protocol === "https:", "must be an https URL");
+
 export const ConfigSchema = z.object({
   DATABASE_URL: z.string().min(1),
   API_PORT: z.coerce.number().int().default(4000),
@@ -17,6 +22,15 @@ export const ConfigSchema = z.object({
   RATE_LIMIT_MAX: z.coerce.number().int().positive().default(300),
   AUTH_RATE_LIMIT_MAX: z.coerce.number().int().positive().default(20),
   LOG_LEVEL: z.string().default("info"),
+  /**
+   * Provider endpoints. Set explicitly (defaults are the public APIs) so the SDKs never
+   * pick up OPENAI_BASE_URL / ANTHROPIC_BASE_URL from the host environment.
+   */
+  AGENTOS_OPENAI_BASE_URL: httpsUrl.default("https://api.openai.com/v1"),
+  AGENTOS_ANTHROPIC_BASE_URL: httpsUrl.default("https://api.anthropic.com"),
+  AGENTOS_XAI_BASE_URL: httpsUrl.default("https://api.x.ai/v1"),
+  PROVIDER_TIMEOUT_MS: z.coerce.number().int().positive().default(120_000),
+  PROVIDER_MAX_RETRIES: z.coerce.number().int().min(0).max(6).default(2),
 });
 export type Config = z.infer<typeof ConfigSchema>;
 

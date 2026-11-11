@@ -42,7 +42,7 @@ describe("provider configuration", () => {
 
   it("refuses to call an unconfigured provider", async () => {
     const reg = createProviderRegistry({ secrets: secrets({}) });
-    const req: ModelRequest = { model: "gpt-5", system: "s", messages: [{ role: "user", content: "hi" }], tools: [], maxOutputTokens: 10 };
+    const req: ModelRequest = { model: "gpt-6-luna", system: "s", messages: [{ role: "user", content: "hi" }], tools: [], maxOutputTokens: 10 };
     await expect(reg.get("openai")!.generate(req, opts())).rejects.toMatchObject({ kind: "not_configured", retryable: false });
   });
 
@@ -60,7 +60,7 @@ describe("error normalization", () => {
     const h = new Headers();
     expect(normalizeAnthropicError(new Anthropic.RateLimitError(429, undefined, "x", h))).toMatchObject({ kind: "rate_limit", retryable: true });
     expect(normalizeAnthropicError(new Anthropic.AuthenticationError(401, undefined, "x", h))).toMatchObject({ kind: "auth", retryable: false });
-    expect(normalizeAnthropicError(new Anthropic.InternalServerError(529, undefined, "overloaded", h))).toMatchObject({ kind: "server", retryable: true });
+    expect(normalizeAnthropicError(new Anthropic.InternalServerError(529, undefined, "overloaded", h))).toMatchObject({ kind: "overloaded", code: "PROVIDER_OVERLOADED", retryable: true });
     expect(normalizeAnthropicError(new Anthropic.APIConnectionTimeoutError())).toMatchObject({ kind: "timeout", retryable: true });
     expect(normalizeAnthropicError(new Error("boom"))).toMatchObject({ kind: "unknown", retryable: false });
   });
@@ -138,7 +138,7 @@ describe("OpenAI-compatible mapping", () => {
     expect(r.stopReason).toBe("tool_use");
     expect(r.toolCalls[0]).toEqual({ id: "call_a", name: "calculator", arguments: { expression: "1+2" } });
     expect(r.toolCalls[1]).toMatchObject({ id: "call_b", arguments: null, parseError: expect.any(String) });
-    expect(r.usage).toEqual({ inputTokens: 7, outputTokens: 3, cachedInputTokens: 0 });
+    expect(r.usage).toEqual({ inputTokens: 7, outputTokens: 3, cachedInputTokens: 0, reasoningTokens: 0 });
   });
 
   it("maps normalized messages to chat format", () => {

@@ -1,12 +1,12 @@
 "use client";
 
-import { CheckCircle2, KeyRound, XCircle } from "lucide-react";
+import { CheckCircle2, KeyRound, RefreshCw, XCircle } from "lucide-react";
 import { useState, type FormEvent } from "react";
 import { ErrorNotice, MockBadge, PageHeader } from "@/components/common";
 import { Badge, Button, Card, CardContent, CardDescription, CardHeader, CardTitle, Input, Label, Select, Skeleton } from "@/components/ui";
 import { api, ApiRequestError } from "@/lib/api";
 import { useApi } from "@/lib/hooks";
-import type { Provider, UsageSummary } from "@/lib/types";
+import type { ModelDiscovery, Provider, UsageSummary } from "@/lib/types";
 import { formatNumber, formatUsd } from "@/lib/utils";
 
 interface Workspace {
@@ -54,20 +54,7 @@ export default function SettingsPage() {
           ) : (
             <div className="grid gap-3 md:grid-cols-2" data-testid="provider-list">
               {providers.data.map((p) => (
-                <div key={p.id} className="rounded-lg border border-border p-4" data-provider={p.id} data-configured={p.configured}>
-                  <div className="flex items-center justify-between gap-2">
-                    <div className="flex items-center gap-2 font-medium">
-                      {p.configured ? <CheckCircle2 className="size-4 text-success" /> : <XCircle className="size-4 text-muted-foreground" />}
-                      {p.label}
-                    </div>
-                    {p.isMock ? <MockBadge /> : <Badge variant={p.configured ? "success" : "secondary"}>{p.configured ? "Connected" : "Not configured"}</Badge>}
-                  </div>
-                  <div className="mt-2 flex items-center gap-1.5 font-mono text-[11px] text-muted-foreground">
-                    <KeyRound className="size-3" /> {ENV_NAMES[p.id]}
-                  </div>
-                  <div className="mt-2 text-xs text-muted-foreground">{p.models.map((m) => m.label).join(" · ")}</div>
-                  {p.configured && !p.isMock ? <div className="mt-2 text-[11px] text-muted-foreground">Key present. A live call has not been verified from this screen.</div> : null}
-                </div>
+                <ProviderCard key={p.id} provider={p} />
               ))}
             </div>
           )}
@@ -168,6 +155,76 @@ export default function SettingsPage() {
           )}
         </CardContent>
       </Card>
+    </div>
+  );
+}
+
+const PRICE_LABEL: Record<string, string> = { published: "published price", unverified: "unverified price", mock: "mock" };
+
+function ProviderCard({ provider: p }: { provider: Provider }) {
+  const [discovery, setDiscovery] = useState<ModelDiscovery | null>(p.discovery);
+  const [checking, setChecking] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  const check = async () => {
+    setChecking(true);
+    setError(null);
+    try {
+      setDiscovery(await api.get<ModelDiscovery>(`/providers/${p.id}/models?refresh=1`));
+    } catch (err) {
+      setError(err instanceof ApiRequestError ? err.message : "Request failed");
+    } finally {
+      setChecking(false);
+    }
+  };
+  const avail = new Map((discovery?.catalog ?? []).map((m) => [m.id, m.availableOnAccount]));
+  return (
+    <div className="min-w-0 rounded-lg border border-border p-4" data-provider={p.id} data-configured={p.configured}>
+      <div className="flex items-center justify-between gap-2">
+        <div className="flex items-center gap-2 font-medium">
+          {p.configured ? <CheckCircle2 className="size-4 text-success" /> : <XCircle className="size-4 text-muted-foreground" />}
+          {p.label}
+        </div>
+        {p.isMock ? (
+          <MockBadge />
+        ) : (
+          <Badge variant={!p.configured ? "secondary" : discovery?.ok ? "success" : discovery ? "destructive" : "secondary"} data-testid="provider-status">
+            {!p.configured ? "Not configured" : discovery?.ok ? "Live: account verified" : discovery ? "Key rejected or unreachable" : "Key set, not checked"}
+          </Badge>
+        )}
+      </div>
+      <div className="mt-2 flex items-center gap-1.5 font-mono text-[11px] text-muted-foreground">
+        <KeyRound className="size-3" /> {ENV_NAMES[p.id]}
+      </div>
+      {p.endpoint ? <div className="mt-1 break-all font-mono text-[11px] text-muted-foreground">Endpoint: {p.endpoint}</div> : null}
+      <ul className="mt-2 flex flex-col gap-1 text-xs">
+        {p.models.map((m) => {
+          const a = avail.get(m.id);
+          return (
+            <li key={m.id} className="flex flex-wrap items-center gap-x-2" data-model={m.id}>
+              <span>{m.label}</span>
+              <span className="font-mono text-[10px] text-muted-foreground">{m.id}</span>
+              <span className="text-[10px] text-muted-foreground">
+                ${m.inputPerMTok}/${m.outputPerMTok} per M · {PRICE_LABEL[m.priceSource] ?? m.priceSource}
+              </span>
+              {a === true ? <Badge variant="success">on account</Badge> : a === false ? <Badge variant="destructive">not on account</Badge> : null}
+            </li>
+          );
+        })}
+      </ul>
+      {!p.isMock && p.configured ? (
+        <div className="mt-3 flex flex-wrap items-center gap-2">
+          <Button size="sm" variant="secondary" onClick={() => void check()} disabled={checking}>
+            <RefreshCw className={checking ? "animate-spin" : undefined} /> Check account
+          </Button>
+          {discovery ? (
+            <span className="text-[11px] text-muted-foreground">
+              {discovery.ok ? `Models API listed ${discovery.listedCount} models` : `${discovery.error?.code ?? "error"}: ${discovery.error?.message ?? ""}`} ·{" "}
+              {new Date(discovery.checkedAt).toLocaleTimeString()}
+            </span>
+          ) : null}
+        </div>
+      ) : null}
+      {error ? <ErrorNotice message={error} className="mt-2" /> : null}
     </div>
   );
 }

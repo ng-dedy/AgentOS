@@ -9,6 +9,6 @@
     "paths": { "@/*": ["./src/*"] },
     "types": ["node"]
   },
-  "include": ["next-env.d.ts", "src", "e2e", "playwright.config.ts", ".next/types/**/*.ts"],
+  "include": ["next-env.d.ts", "src", "e2e", "e2e-live", "playwright.config.ts", "playwright.live.config.ts", ".next/types/**/*.ts"],
   "exclude": ["node_modules"]
 }

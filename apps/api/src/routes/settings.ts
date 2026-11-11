@@ -5,13 +5,22 @@ import type { AppDeps } from "../app";
 import { requireAuth, requireOwner } from "../auth/plugin";
 import { parse } from "../http/errors";
 import { audit, money } from "../http/support";
+import { AppError } from "../http/errors";
 
 export async function settingsRoutes(app: FastifyInstance, deps: AppDeps) {
   const { prisma, providers, tools } = deps;
 
   app.get("/providers", async (req) => {
     requireAuth(req);
-    return providers.list();
+    return providers.list().map((p) => ({ ...p, discovery: deps.discovery.peek(p.id) }));
+  });
+
+  /** Compare the catalog with the provider's Models API for this deployment's key. */
+  app.get<{ Params: { id: string }; Querystring: { refresh?: string } }>("/providers/:id/models", async (req) => {
+    requireAuth(req);
+    const result = await deps.discovery.discover(req.params.id, req.query.refresh === "1");
+    if (!result) throw new AppError(404, "not_found", "Provider not found");
+    return result;
   });
 
   app.get("/tools", async (req) => {

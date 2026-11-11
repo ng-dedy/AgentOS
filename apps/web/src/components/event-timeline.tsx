@@ -9,6 +9,7 @@ import {
   CircleSlash,
   Hand,
   PlayCircle,
+  RotateCcw,
   ShieldAlert,
   ShieldCheck,
   Sparkles,
@@ -36,14 +37,43 @@ function describe(e: RunEvent, agentName: (id: string | null) => string): Descri
     case "task.status":
       return { icon: <CircleSlash />, title: `Status → ${String(p.status).replace("_", " ")}`, tone: "muted" };
     case "run.started":
-      return { icon: <PlayCircle />, title: `${who} started on ${String(p.provider)} · ${String(p.model)}${p.isMock ? " (MOCK)" : ""}`, tone: "accent" };
+      return {
+        icon: <PlayCircle />,
+        title: `${who} started on ${String(p.provider)} · ${String(p.model)} ${p.isMock ? "(MOCK test double, not an AI model)" : "(live provider)"}`,
+        tone: "accent",
+      };
     case "model.output": {
       const calls = (p.toolCalls as { name: string }[] | undefined) ?? [];
+      const meta = [
+        p.servedModel ? `model ${String(p.servedModel)}` : null,
+        p.stopReason ? `stop: ${String(p.stopReason)}` : null,
+        p.requestId ? `request ${String(p.requestId)}` : null,
+      ].filter(Boolean);
       return {
         icon: <Bot />,
         title: calls.length ? `${who} requested ${calls.map((c) => c.name).join(", ")}` : `${who} responded`,
-        tone: "default",
-        body: p.text ? <p className="whitespace-pre-wrap text-sm text-foreground/90">{String(p.text)}</p> : undefined,
+        tone: p.stopReason === "refusal" ? "destructive" : "default",
+        body: (
+          <div className="flex flex-col gap-1">
+            {p.text ? <p className="whitespace-pre-wrap break-words text-sm text-foreground/90">{String(p.text)}</p> : null}
+            {p.refusal ? <p className="text-sm text-destructive">Refusal: {String(p.refusal)}</p> : null}
+            {meta.length ? (
+              <p className="break-all font-mono text-[10px] text-muted-foreground" data-testid="model-meta">
+                {p.isMock ? "MOCK · " : "LIVE · "}
+                {meta.join(" · ")}
+              </p>
+            ) : null}
+          </div>
+        ),
+      };
+    }
+    case "model.retry": {
+      const err = (p.error ?? {}) as Record<string, unknown>;
+      return {
+        icon: <RotateCcw />,
+        title: `Provider error ${String(err.code ?? "")}, retry ${String(p.attempt)}/${String(p.maxRetries)} in ${Math.round(Number(p.delayMs))} ms`,
+        tone: "warning",
+        body: <p className="text-sm text-muted-foreground">{String(err.message ?? "")}{err.status ? ` (HTTP ${String(err.status)})` : ""}</p>,
       };
     }
     case "tool.requested":
@@ -80,16 +110,40 @@ function describe(e: RunEvent, agentName: (id: string | null) => string): Descri
         tone: "accent",
         body: <p className="text-sm text-muted-foreground">{String(p.summary)}</p>,
       };
-    case "usage.recorded":
+    case "usage.recorded": {
+      const extra = [
+        Number(p.cachedInputTokens) > 0 ? `${String(p.cachedInputTokens)} cached` : null,
+        Number(p.reasoningTokens) > 0 ? `${String(p.reasoningTokens)} reasoning` : null,
+      ].filter(Boolean);
+      const price = p.priceSource === "published" ? "est." : p.priceSource === "mock" ? "mock price" : "unverified price";
       return {
         icon: <CircleDollarSign />,
-        title: `Usage: ${String(p.inputTokens)} in / ${String(p.outputTokens)} out · ${formatUsd(Number(p.costUsd))} (run ${formatUsd(Number(p.runCostUsd))})`,
+        title: `Usage: ${String(p.inputTokens)} in / ${String(p.outputTokens)} out${extra.length ? ` (${extra.join(", ")})` : ""} · ${price} ${formatUsd(Number(p.costUsd))} (run ${formatUsd(Number(p.runCostUsd))})`,
         tone: "muted",
       };
+    }
     case "run.completed":
       return { icon: <CheckCircle2 />, title: `Run completed`, tone: "success" };
-    case "run.failed":
-      return { icon: <XCircle />, title: `Run failed: ${String(p.failureCode)}`, tone: "destructive", body: <p className="text-sm">{String(p.message)}</p> };
+    case "run.failed": {
+      const err = p.error as Record<string, unknown> | undefined;
+      return {
+        icon: <XCircle />,
+        title: `Run failed: ${String(p.failureCode)}`,
+        tone: "destructive",
+        body: (
+          <div className="flex flex-col gap-1">
+            <p className="text-sm">{String(p.message)}</p>
+            {err ? (
+              <p className="break-all font-mono text-[10px] text-muted-foreground" data-testid="failure-detail">
+                {[err.code, err.status ? `HTTP ${String(err.status)}` : null, err.providerCode, err.requestId ? `request ${String(err.requestId)}` : null]
+                  .filter(Boolean)
+                  .join(" · ")}
+              </p>
+            ) : null}
+          </div>
+        ),
+      };
+    }
     case "run.cancelled":
       return { icon: <Ban />, title: "Run cancelled", tone: "muted" };
     default:

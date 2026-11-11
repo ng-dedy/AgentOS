@@ -21,8 +21,26 @@ export interface EngineOptions {
   providerTimeoutMs?: number;
   /** Retries for retryable provider errors (in addition to the first attempt). */
   providerRetries?: number;
+  /** First backoff delay; doubles per attempt, with full jitter between 50% and 100%. */
   retryBaseDelayMs?: number;
-  logger?: { error: (obj: unknown, msg?: string) => void };
+  /** Upper bound for one backoff delay. */
+  retryMaxDelayMs?: number;
+  /**
+   * If the provider asks us to wait longer than this (Retry-After), fail now with a
+   * retryable error instead of holding the run open.
+   */
+  maxRetryAfterMs?: number;
+  /** Stop a run after this many consecutive model turns in which every tool call failed or was rejected. */
+  maxConsecutiveToolFailures?: number;
+  /** Jitter source, injectable for tests. */
+  random?: () => number;
+  logger?: EngineLogger;
+}
+
+export interface EngineLogger {
+  error: (obj: unknown, msg?: string) => void;
+  warn?: (obj: unknown, msg?: string) => void;
+  info?: (obj: unknown, msg?: string) => void;
 }
 
 export type RunOutcome =
@@ -32,8 +50,32 @@ export type RunOutcome =
   | { status: "cancelled" };
 
 class RunStop extends Error {
-  constructor(readonly outcome: Exclude<RunOutcome, { status: "completed" } | { status: "awaiting_approval" }>) {
+  constructor(
+    readonly outcome: Exclude<RunOutcome, { status: "completed" } | { status: "awaiting_approval" }>,
+    /** Structured, secret-free error detail for the run.failed event. */
+    readonly detail?: Record<string, unknown>,
+  ) {
     super(outcome.status);
+  }
+}
+
+/** Map a final (non-retried or retries-exhausted) provider error to a run failure code. */
+export function failureForProviderError(err: ProviderError): FailureCode {
+  switch (err.kind) {
+    case "auth":
+      return "provider_auth";
+    case "quota_exceeded":
+      return "provider_quota";
+    case "model_not_found":
+      return "model_not_found";
+    case "refusal":
+      return "provider_refusal";
+    case "context_length":
+      return "context_length";
+    case "not_configured":
+      return "provider_not_configured";
+    default:
+      return err.retryable ? "provider_retryable_error" : "provider_error";
   }
 }
 
@@ -108,7 +150,7 @@ export class AgentEngine {
 
       return await this.loop(task, agent, provider, run, controller.signal);
     } catch (err) {
-      if (err instanceof RunStop) return await this.finishStopped(task, run, err.outcome);
+      if (err instanceof RunStop) return await this.finishStopped(task, run, err.outcome, err.detail);
       this.opts.logger?.error({ err, taskId }, "run crashed");
       return await this.failTask(task, run, "internal_error", "Internal error while running the task");
     } finally {
@@ -123,6 +165,8 @@ export class AgentEngine {
     const toolSpecs = tools.specs(allowed);
     const catalogEntry = this.opts.providers.catalog.find(agent.provider, agent.model);
     const maxOutputTokens = catalogEntry?.maxOutputTokens ?? 4096;
+    const maxToolFailures = this.opts.maxConsecutiveToolFailures ?? 3;
+    let consecutiveToolFailures = 0;
 
     for (;;) {
       await this.checkCancelled(task, signal);
@@ -141,6 +185,24 @@ export class AgentEngine {
 
       // Usage accounting happens before any limit check so overspend is always recorded.
       const cost = this.opts.providers.catalog.cost(agent.provider, agent.model, response.usage);
+      this.opts.logger?.info?.(
+        {
+          event: "model_call",
+          taskId: task.id,
+          runId: run.id,
+          provider: agent.provider,
+          model: agent.model,
+          servedModel: response.servedModel,
+          requestId: response.requestId,
+          stopReason: response.stopReason,
+          inputTokens: response.usage.inputTokens,
+          outputTokens: response.usage.outputTokens,
+          reasoningTokens: response.usage.reasoningTokens,
+          toolCalls: response.toolCalls.length,
+          estimatedCostUsd: cost,
+        },
+        "model call completed",
+      );
       run.iterations += 1;
       run.inputTokens += response.usage.inputTokens;
       run.outputTokens += response.usage.outputTokens;
@@ -164,8 +226,13 @@ export class AgentEngine {
       await this.emit(task, run, "usage.recorded", {
         inputTokens: response.usage.inputTokens,
         outputTokens: response.usage.outputTokens,
+        cachedInputTokens: response.usage.cachedInputTokens,
+        reasoningTokens: response.usage.reasoningTokens ?? 0,
         costUsd: cost,
         runCostUsd: run.costUsd,
+        // Cost is always an estimate from the catalog; priceSource says how trustworthy the price is.
+        costIsEstimate: true,
+        priceSource: catalogEntry?.priceSource ?? "unverified",
       });
 
       await store.appendMessage(task.organizationId, task.conversationId!, run.id, {
@@ -179,6 +246,12 @@ export class AgentEngine {
         iteration: run.iterations,
         stopReason: response.stopReason,
         toolCalls: response.toolCalls.map((c) => ({ id: c.id, name: c.name })),
+        provider: agent.provider,
+        requestedModel: agent.model,
+        servedModel: response.servedModel ?? null,
+        requestId: response.requestId ?? null,
+        isMock: provider.isMock,
+        ...(response.refusal ? { refusal: response.refusal } : {}),
       });
 
       if (run.costUsd > agent.maxRunCostUsd) {
@@ -192,18 +265,36 @@ export class AgentEngine {
         throw new RunStop({ status: "failed", failureCode: "token_limit", message: `Run exceeded ${agent.maxRunTokens} tokens` });
       }
       if (response.stopReason === "refusal") {
-        throw new RunStop({ status: "failed", failureCode: "provider_error", message: "The model declined the request" });
+        throw new RunStop(
+          {
+            status: "failed",
+            failureCode: "provider_refusal",
+            message: `The model declined the request${response.refusal ? `: ${truncate(response.refusal, 500)}` : ""}`,
+          },
+          { code: "PROVIDER_REFUSAL", provider: agent.provider },
+        );
       }
 
       if (response.toolCalls.length === 0) return this.complete(task, run, response);
 
       let waiting = false;
+      let anySucceeded = false;
       for (const call of response.toolCalls) {
         await this.checkCancelled(task, signal);
         const r = await this.handleToolCall(task, agent, run, call, signal);
         if (r === "awaiting_approval") waiting = true;
+        if (r === "succeeded") anySucceeded = true;
       }
       if (waiting) return this.pause(task, run);
+      // Guard against a model that keeps retrying a tool call that cannot succeed.
+      consecutiveToolFailures = anySucceeded ? 0 : consecutiveToolFailures + 1;
+      if (consecutiveToolFailures >= maxToolFailures) {
+        throw new RunStop({
+          status: "failed",
+          failureCode: "tool_failure_limit",
+          message: `Stopped after ${consecutiveToolFailures} consecutive model turns whose tool calls all failed or were rejected`,
+        });
+      }
     }
   }
 
@@ -216,7 +307,11 @@ export class AgentEngine {
   ): Promise<ModelResponse> {
     const retries = this.opts.providerRetries ?? 2;
     const base = this.opts.retryBaseDelayMs ?? 500;
+    const cap = this.opts.retryMaxDelayMs ?? 8_000;
+    const maxRetryAfter = this.opts.maxRetryAfterMs ?? 30_000;
+    const random = this.opts.random ?? Math.random;
     for (let attempt = 0; ; attempt++) {
+      const started = Date.now();
       try {
         return await provider.generate(req, {
           signal,
@@ -228,7 +323,7 @@ export class AgentEngine {
               runId: run.id,
               agentId: run.agentId,
               type: "model.delta",
-              payload: { text },
+              payload: { text, attempt },
             }),
         });
       } catch (err) {
@@ -236,15 +331,26 @@ export class AgentEngine {
           throw new RunStop({ status: "cancelled" });
         }
         const pe = err instanceof ProviderError ? err : null;
-        if (pe?.retryable && attempt < retries) {
-          await delay(base * 2 ** attempt, signal);
+        const detail = pe ? pe.toJSON() : { code: "PROVIDER_UNKNOWN", provider: provider.id };
+        const log = { event: "model_call_failed", taskId: task.id, runId: run.id, model: req.model, attempt, latencyMs: Date.now() - started, ...detail };
+        const retryAfter = pe?.retryAfterMs;
+        if (pe?.retryable && attempt < retries && (retryAfter === undefined || retryAfter <= maxRetryAfter)) {
+          const backoff = Math.min(cap, base * 2 ** attempt) * (0.5 + random() / 2);
+          const waitMs = Math.round(Math.max(backoff, retryAfter ?? 0));
+          this.opts.logger?.warn?.({ ...log, retryInMs: waitMs }, "model call failed, retrying");
+          // Persisted so the UI can discard partial streamed text from the failed attempt.
+          await this.emit(task, run, "model.retry", { attempt: attempt + 1, maxRetries: retries, delayMs: waitMs, error: detail });
+          await delay(waitMs, signal);
+          if (signal.aborted) throw new RunStop({ status: "cancelled" });
           continue;
         }
-        throw new RunStop({
-          status: "failed",
-          failureCode: pe?.retryable ? "provider_retryable_error" : "provider_error",
-          message: pe ? pe.message : "Unexpected provider error",
-        });
+        this.opts.logger?.error(log, "model call failed");
+        const failureCode = pe ? failureForProviderError(pe) : "provider_error";
+        const suffix = pe?.retryable && attempt > 0 ? ` (after ${attempt + 1} attempts)` : "";
+        throw new RunStop(
+          { status: "failed", failureCode, message: `${pe ? pe.message : "Unexpected provider error"}${suffix}` },
+          detail,
+        );
       }
     }
   }
@@ -256,7 +362,7 @@ export class AgentEngine {
     run: RunRecord,
     call: ToolCallRequest,
     signal: AbortSignal,
-  ): Promise<"done" | "awaiting_approval"> {
+  ): Promise<"succeeded" | "failed" | "awaiting_approval"> {
     const { store, tools } = this.opts;
     const orgId = task.organizationId;
     const tool = tools.get(call.name);
@@ -269,7 +375,7 @@ export class AgentEngine {
     });
     if (!created && record.status !== "requested") {
       // Already handled (e.g. replay after a crash). Do not execute twice.
-      return record.status === "awaiting_approval" ? "awaiting_approval" : "done";
+      return record.status === "awaiting_approval" ? "awaiting_approval" : record.status === "succeeded" ? "succeeded" : "failed";
     }
     await this.emit(task, run, "tool.requested", { toolCallId: record.id, toolName: call.name, arguments: call.arguments });
 
@@ -281,7 +387,7 @@ export class AgentEngine {
         reason,
       });
       await this.appendToolResult(task, run, call, { error: reason }, true);
-      return "done" as const;
+      return "failed" as const;
     };
 
     if (!tool || !agent.allowedTools.includes(call.name)) {
@@ -320,8 +426,7 @@ export class AgentEngine {
       return "awaiting_approval";
     }
 
-    await this.runTool(task, agent, run, record, call, signal);
-    return "done";
+    return (await this.runTool(task, agent, run, record, call, signal)) ? "succeeded" : "failed";
   }
 
   private async runTool(
@@ -331,7 +436,7 @@ export class AgentEngine {
     record: Pick<ToolCallRecord, "id">,
     call: ToolCallRequest,
     signal: AbortSignal,
-  ): Promise<void> {
+  ): Promise<boolean> {
     const { store, tools } = this.opts;
     const tool = tools.get(call.name);
     if (!tool) throw new Error("tool vanished");
@@ -347,11 +452,13 @@ export class AgentEngine {
       await store.updateToolCall(task.organizationId, record.id, { status: "succeeded", output: res.output, durationMs: res.durationMs });
       await this.emit(task, run, "tool.completed", { toolCallId: record.id, toolName: call.name, output: res.output, durationMs: res.durationMs });
       await this.appendToolResult(task, run, call, res.output, false);
+      return true;
     } else {
       if (res.kind === "aborted") throw new RunStop({ status: "cancelled" });
       await store.updateToolCall(task.organizationId, record.id, { status: "failed", error: res.error, durationMs: res.durationMs });
       await this.emit(task, run, "tool.failed", { toolCallId: record.id, toolName: call.name, reason: res.error, kind: res.kind });
       await this.appendToolResult(task, run, call, { error: res.error }, true);
+      return false;
     }
   }
 
@@ -415,7 +522,12 @@ export class AgentEngine {
     return { status: "completed", result: response.text };
   }
 
-  private async finishStopped(task: TaskRecord, run: RunRecord | null, outcome: RunStop["outcome"]): Promise<RunOutcome> {
+  private async finishStopped(
+    task: TaskRecord,
+    run: RunRecord | null,
+    outcome: RunStop["outcome"],
+    detail?: Record<string, unknown>,
+  ): Promise<RunOutcome> {
     if (outcome.status === "cancelled") {
       const now = this.now();
       if (run) await this.opts.store.updateRun(task.organizationId, run.id, { status: "cancelled", completedAt: now });
@@ -425,14 +537,21 @@ export class AgentEngine {
       await this.emit(task, run, "task.status", { status: "cancelled" });
       return outcome;
     }
-    return this.failTask(task, run, outcome.failureCode, outcome.message);
+    return this.failTask(task, run, outcome.failureCode, outcome.message, detail);
   }
 
-  private async failTask(task: TaskRecord, run: RunRecord | null, code: FailureCode, message: string): Promise<RunOutcome> {
+  private async failTask(
+    task: TaskRecord,
+    run: RunRecord | null,
+    code: FailureCode,
+    message: string,
+    detail?: Record<string, unknown>,
+  ): Promise<RunOutcome> {
     const now = this.now();
     if (run) await this.opts.store.updateRun(task.organizationId, run.id, { status: "failed", failureCode: code, failureMessage: message, completedAt: now });
     await this.opts.store.updateTask(task.organizationId, task.id, { status: "failed", failureCode: code, failureMessage: message, completedAt: now });
-    await this.emit(task, run, "run.failed", { failureCode: code, message });
+    await this.emit(task, run, "run.failed", { failureCode: code, message, ...(detail ? { error: detail } : {}) });
+    this.opts.logger?.warn?.({ event: "run_failed", taskId: task.id, runId: run?.id, failureCode: code, ...(detail ?? {}) }, "run failed");
     await this.emit(task, run, "task.status", { status: "failed", failureCode: code });
     return { status: "failed", failureCode: code, message };
   }
@@ -470,4 +589,8 @@ function delay(ms: number, signal: AbortSignal): Promise<void> {
       resolve();
     }, { once: true });
   });
+}
+
+function truncate(s: string, n: number): string {
+  return s.length > n ? `${s.slice(0, n)}…` : s;
 }

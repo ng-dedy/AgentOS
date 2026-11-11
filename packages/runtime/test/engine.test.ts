@@ -132,7 +132,7 @@ describe("agent execution lifecycle", () => {
   it("does not retry non-retryable errors", async () => {
     const a = s.store.addAgent({ organizationId: ORG, name: "A" });
     const t = s.store.addTask({ organizationId: ORG, agentId: a.id, instruction: "[mock:error=auth]" });
-    expect(await s.engine.execute(ORG, t.id)).toMatchObject({ status: "failed", failureCode: "provider_error" });
+    expect(await s.engine.execute(ORG, t.id)).toMatchObject({ status: "failed", failureCode: "provider_auth" });
   });
 
   it("cancels a running task", async () => {

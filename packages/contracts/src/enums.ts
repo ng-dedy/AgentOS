@@ -47,6 +47,12 @@ export const FailureCodeSchema = z.enum([
   "provider_not_configured",
   "provider_error",
   "provider_retryable_error",
+  "provider_auth",
+  "provider_quota",
+  "model_not_found",
+  "provider_refusal",
+  "context_length",
+  "tool_failure_limit",
   "iteration_limit",
   "budget_exceeded",
   "token_limit",
@@ -57,6 +63,8 @@ export const FailureCodeSchema = z.enum([
 export type FailureCode = z.infer<typeof FailureCodeSchema>;
 export const RETRYABLE_FAILURES: readonly FailureCode[] = [
   "provider_retryable_error",
+  "provider_auth",
+  "provider_quota",
   "interrupted",
   "provider_error",
   "step_failed",

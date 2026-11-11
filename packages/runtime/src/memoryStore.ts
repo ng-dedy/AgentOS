@@ -25,7 +25,7 @@ export class MemoryRunStore implements RunStore, EventSink {
   messages = new Map<string, ModelMessage[]>();
   toolCalls = new Map<string, ToolCallRecord & { organizationId: string; taskId: string }>();
   approvals = new Map<string, ApprovalRecord>();
-  usage: { organizationId: string; runId: string; costUsd: number; inputTokens: number; outputTokens: number }[] = [];
+  usage: { organizationId: string; runId: string; costUsd: number; inputTokens: number; outputTokens: number; cachedTokens: number }[] = [];
   events: RunEvent[] = [];
   transient: NewEvent[] = [];
   private eventSeq = 0;
@@ -179,7 +179,7 @@ export class MemoryRunStore implements RunStore, EventSink {
     return n;
   }
   async recordUsage(orgId: string, input: Parameters<RunStore["recordUsage"]>[1]) {
-    this.usage.push({ organizationId: orgId, runId: input.runId, costUsd: input.costUsd, inputTokens: input.inputTokens, outputTokens: input.outputTokens });
+    this.usage.push({ organizationId: orgId, runId: input.runId, costUsd: input.costUsd, inputTokens: input.inputTokens, outputTokens: input.outputTokens, cachedTokens: input.cachedTokens });
   }
 
   /** Test helper: decide an approval as a human would through the API. */

@@ -37,7 +37,18 @@ export interface Provider {
   label: string;
   configured: boolean;
   isMock: boolean;
-  models: { id: string; label: string; inputPerMTok: number; outputPerMTok: number }[];
+  endpoint: string | null;
+  models: { id: string; label: string; inputPerMTok: number; outputPerMTok: number; priceSource: "published" | "unverified" | "mock" }[];
+  discovery: ModelDiscovery | null;
+}
+
+export interface ModelDiscovery {
+  provider: string;
+  checkedAt: string;
+  ok: boolean;
+  error: { code: string; message: string; status?: number } | null;
+  catalog: { id: string; label: string; availableOnAccount: boolean | null; priceSource: string }[];
+  listedCount: number;
 }
 
 export interface ToolInfo {
@@ -145,7 +156,15 @@ export interface Dashboard {
   agents: number;
   tasks: { active: number; completed: number; failed: number; cancelled: number };
   pendingApprovals: number;
-  usage: { modelCalls: number; costUsd: number; inputTokens: number; outputTokens: number };
+  usage: {
+    modelCalls: number;
+    costUsd: number;
+    inputTokens: number;
+    outputTokens: number;
+    live: { modelCalls: number; costUsd: number };
+    mock: { modelCalls: number; costUsd: number };
+  };
+  providers: { id: string; label: string; configured: boolean; isMock: boolean }[];
 }
 
 export interface UsageSummary {

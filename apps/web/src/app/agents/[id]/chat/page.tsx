@@ -51,7 +51,8 @@ export default function ChatPage() {
     onDelta: (e) => setStreamText((s) => s + String((e.payload as { text: string }).text)),
     onEvent: (e) => {
       const p = e.payload as Record<string, unknown>;
-      if (e.type === "model.output") setStreamText("");
+      if (e.type === "model.output" || e.type === "model.retry") setStreamText("");
+      if (e.type === "model.retry") setActivity((a) => [...a, `Provider error, retrying (attempt ${String(p.attempt)})…`]);
       if (e.type === "tool.requested") setActivity((a) => [...a, `Calling ${String(p.toolName)}…`]);
       if (e.type === "tool.completed") setActivity((a) => [...a, `${String(p.toolName)} returned a result`]);
       if (e.type === "tool.rejected" || e.type === "tool.failed") setActivity((a) => [...a, `${String(p.toolName)}: ${String(p.reason)}`]);

@@ -77,5 +77,14 @@ export interface ProviderInfo {
   label: string;
   configured: boolean;
   isMock: boolean;
-  models: { id: string; label: string; inputPerMTok: number; outputPerMTok: number }[];
+  /** API base URL the server sends requests to; null for the mock. */
+  endpoint: string | null;
+  models: {
+    id: string;
+    label: string;
+    inputPerMTok: number;
+    outputPerMTok: number;
+    /** "published": copied from the provider's price list; "unverified": placeholder; "mock": not a real model. */
+    priceSource: "published" | "unverified" | "mock";
+  }[];
 }

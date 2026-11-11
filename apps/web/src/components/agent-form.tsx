@@ -109,7 +109,7 @@ export function AgentForm({ agent, onSaved }: { agent?: Agent; onSaved: (a: Agen
           <Select id="model" name="model" required value={model} onChange={(e) => setModel(e.target.value)} disabled={!models.length}>
             {models.map((m) => (
               <option key={m.id} value={m.id}>
-                {m.label} · ${m.inputPerMTok}/${m.outputPerMTok} per M tokens
+                {m.label} · ${m.inputPerMTok}/${m.outputPerMTok} per M tokens{m.priceSource === "unverified" ? " (unverified price)" : ""}
               </option>
             ))}
           </Select>

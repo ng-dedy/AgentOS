@@ -3,10 +3,18 @@
   "version": "0.1.0",
   "private": true,
   "type": "module",
-  "exports": { ".": "./src/index.ts" },
+  "exports": {
+    ".": "./src/index.ts"
+  },
   "scripts": {
     "typecheck": "tsc -p tsconfig.json",
-    "test": "vitest run --passWithNoTests"
+    "test": "vitest run --passWithNoTests --exclude \"test/live/**\"",
+    "test:live": "AGENTOS_LIVE_TESTS=1 vitest run test/live"
   },
-  "dependencies": { "@agentos/contracts": "workspace:*", "@agentos/providers": "workspace:*", "@agentos/tools": "workspace:*", "zod": "4.6.7" }
+  "dependencies": {
+    "@agentos/contracts": "workspace:*",
+    "@agentos/providers": "workspace:*",
+    "@agentos/tools": "workspace:*",
+    "zod": "4.6.7"
+  }
 }

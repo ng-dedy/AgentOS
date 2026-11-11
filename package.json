@@ -16,7 +16,9 @@
     "db:migrate": "pnpm --filter @agentos/db migrate:dev",
     "db:deploy": "pnpm --filter @agentos/db migrate:deploy",
     "db:seed": "pnpm --filter @agentos/api seed",
-    "verify": "pnpm typecheck && pnpm lint && pnpm test && pnpm test:e2e"
+    "verify": "pnpm typecheck && pnpm lint && pnpm test && pnpm test:e2e",
+    "test:live": "pnpm --filter @agentos/runtime test:live",
+    "test:e2e:live": "pnpm --filter @agentos/web test:e2e:live"
   },
   "devDependencies": {
     "@eslint/js": "^10.0.1",
