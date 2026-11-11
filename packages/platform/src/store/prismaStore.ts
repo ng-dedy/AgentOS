@@ -1,7 +1,19 @@
 import type { FailureCode, Handoff, RunStatus, TaskKind, TaskStatus, ToolCallStatus, ApprovalStatus } from "@agentos/contracts";
 import { Prisma, type PrismaClient } from "@agentos/db";
 import type { ModelMessage, ToolCallRequest } from "@agentos/providers";
-import type { AgentConfig, ApprovalRecord, AssistantTurn, PipelineStepSpec, RunRecord, RunStore, TaskRecord, ToolCallRecord } from "@agentos/runtime";
+import type {
+  AgentConfig,
+  ApprovalRecord,
+  AssistantTurn,
+  PipelineStepSpec,
+  ReserveModelCallInput,
+  ReserveModelCallResult,
+  RunRecord,
+  RunStore,
+  SpendSnapshot,
+  TaskRecord,
+  ToolCallRecord,
+} from "@agentos/runtime";
 import { jsonSafe } from "../events/bus";
 
 type TaskRow = Prisma.TaskGetPayload<object>;
@@ -299,9 +311,90 @@ export class PrismaRunStore implements RunStore {
     return r.count;
   }
 
+  async reserveModelCall(orgId: string, input: ReserveModelCallInput): Promise<ReserveModelCallResult> {
+    return this.db.$transaction(async (tx) => {
+      // Serialize reservations per task tree: two requests cannot both fit under one limit.
+      await tx.$executeRaw`SELECT pg_advisory_xact_lock(hashtextextended(${`agentos-budget:${input.rootTaskId}`}, 0))`;
+      const open = await tx.modelCallAttempt.findMany({
+        where: { organizationId: orgId, runId: input.runId, turn: input.turn, status: "reserved" },
+        select: { id: true, turn: true, sequence: true, reservedUsd: true, activityAttempt: true },
+      });
+      if (open.length > 0) {
+        await tx.modelCallAttempt.updateMany({ where: { id: { in: open.map((o) => o.id) }, status: "reserved" }, data: { status: "orphaned", settledAt: new Date() } });
+      }
+      const orphaned = open.map((o) => ({ id: o.id, turn: o.turn, sequence: o.sequence, reservedUsd: Number(o.reservedUsd), activityAttempt: o.activityAttempt }));
+      const lostReplies = await tx.modelCallAttempt.count({ where: { organizationId: orgId, runId: input.runId, turn: input.turn, status: "succeeded", recorded: false } });
+      const treeRecorded = await tx.agentRun.aggregate({
+        where: { organizationId: orgId, OR: [{ taskId: input.rootTaskId }, { task: { parentTaskId: input.rootTaskId } }] },
+        _sum: { costUsd: true },
+      });
+      const runRow = await tx.agentRun.findFirst({ where: { id: input.runId, organizationId: orgId }, select: { costUsd: true } });
+      const [u] = await tx.$queryRaw<{ tree: string; run: string }[]>`
+        SELECT
+          COALESCE(SUM(${UNACCOUNTED}), 0)::text AS tree,
+          COALESCE(SUM(CASE WHEN "runId" = ${input.runId} THEN ${UNACCOUNTED} ELSE 0 END), 0)::text AS run
+        FROM "ModelCallAttempt" WHERE "organizationId" = ${orgId} AND "rootTaskId" = ${input.rootTaskId}`;
+      const tree = { recordedUsd: Number(treeRecorded._sum.costUsd ?? 0), unaccountedUsd: Number(u?.tree ?? 0) };
+      const run = { recordedUsd: Number(runRow?.costUsd ?? 0), unaccountedUsd: Number(u?.run ?? 0) };
+      const over = (limit: number | null, snap: SpendSnapshot) => limit !== null && snap.recordedUsd + snap.unaccountedUsd + input.reservedUsd > limit + 1e-9;
+      if (over(input.treeLimitUsd, tree)) return { ok: false as const, scope: "task" as const, limitUsd: input.treeLimitUsd!, tree, run, reservedUsd: input.reservedUsd, orphaned };
+      if (over(input.runLimitUsd, run)) return { ok: false as const, scope: "run" as const, limitUsd: input.runLimitUsd!, tree, run, reservedUsd: input.reservedUsd, orphaned };
+      const sequence = (await tx.modelCallAttempt.count({ where: { runId: input.runId, turn: input.turn } })) + 1;
+      const row = await tx.modelCallAttempt.create({
+        data: {
+          organizationId: orgId,
+          rootTaskId: input.rootTaskId,
+          taskId: input.taskId,
+          runId: input.runId,
+          turn: input.turn,
+          sequence,
+          activityAttempt: input.activityAttempt,
+          provider: input.provider,
+          model: input.model,
+          status: "reserved",
+          reservedUsd: new Prisma.Decimal(input.reservedUsd.toFixed(6)),
+          possibleDuplicate: orphaned.length > 0 || lostReplies > 0,
+        },
+      });
+      return { ok: true as const, attemptId: row.id, sequence, orphaned, lostReplies, tree, run };
+    });
+  }
+
+  async settleModelCall(orgId: string, attemptId: string, patch: Parameters<RunStore["settleModelCall"]>[2]) {
+    await this.db.modelCallAttempt.updateMany({
+      // Only an open reservation settles; an orphaned one keeps counting at its reserved cost.
+      where: { id: attemptId, organizationId: orgId, status: "reserved" },
+      data: {
+        status: patch.status,
+        actualUsd: patch.actualUsd === undefined ? null : new Prisma.Decimal(patch.actualUsd.toFixed(6)),
+        inputTokens: patch.inputTokens ?? null,
+        outputTokens: patch.outputTokens ?? null,
+        billingUnknown: patch.billingUnknown ?? false,
+        error: patch.error?.slice(0, 500) ?? null,
+        settledAt: new Date(),
+      },
+    });
+  }
+
+  async markModelCallRecorded(orgId: string, attemptId: string) {
+    await this.db.modelCallAttempt.updateMany({ where: { id: attemptId, organizationId: orgId }, data: { recorded: true } });
+  }
+
   async recordUsage(orgId: string, input: Parameters<RunStore["recordUsage"]>[1]) {
     await this.db.usageRecord.create({
       data: { organizationId: orgId, ...input, costUsd: new Prisma.Decimal(input.costUsd.toFixed(6)) },
     });
   }
 }
+
+/**
+ * What a ledger row adds to spend beyond recorded usage (mirrors `unaccountedUsd` in the
+ * memory store): open and orphaned reservations and failed requests that may have been
+ * billed count at the reserved maximum; a reply that succeeded but was never stored counts
+ * at its estimated cost.
+ */
+const UNACCOUNTED = Prisma.sql`CASE
+  WHEN "status" IN ('reserved', 'orphaned') THEN "reservedUsd"
+  WHEN "status" = 'failed' AND "billingUnknown" THEN "reservedUsd"
+  WHEN "status" = 'succeeded' AND NOT "recorded" THEN COALESCE("actualUsd", "reservedUsd")
+  ELSE 0 END`;

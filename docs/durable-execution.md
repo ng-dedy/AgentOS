@@ -68,11 +68,13 @@ An API restart does not affect workflows. `recoverInterruptedTasks`, which marks
 
 ## Realtime events across processes
 
-* Each `RunEvent` insert fires a trigger that runs `pg_notify('agentos_events', {o, r, s})`. The payload holds ids only, and the notification is delivered after commit.
-* Each API instance holds one `LISTEN` connection (`PgEventListener`). It reads notified rows back from Postgres and publishes them to its local bus. After a dropped connection it reconnects with backoff and catches up on `seq > lastSeen` for organizations with live subscribers.
-* Live-only `model.delta` chunks travel on `agentos_transient` through `pg_notify`. They are serialized per worker so they stay in order, and chunked below the 8 KB limit.
-* The bus and SSE drop duplicates by a set of seq numbers, not by a "greater than" cursor, because events from different writers can commit slightly out of seq order. `Last-Event-ID` replay from Postgres is unchanged.
-* Redis was available but is not needed: Postgres already is the source of truth, and NOTIFY adds no new infrastructure.
+* Each `RunEvent` insert fires a trigger that runs `pg_notify('agentos_events', {o, r, s})` with ids only, delivered after commit.
+* **Commit-safe cursor (2C).** `seq` comes from a sequence, so a transaction can commit after a later seq is already visible; 2B's `seq > lastSeen` catch-up could skip such an event forever. Each row now also records `txid xid8 DEFAULT pg_current_xact_id()`. A reader takes, in one REPEATABLE READ transaction, the watermark `pg_snapshot_xmin(pg_current_snapshot())` and the rows with `txid >= previous watermark`. Every transaction below the watermark had finished when the snapshot was taken, so nothing below it can appear later. SSE ids are `<watermark>.<seq>`; a bare number is still accepted as a 2B cursor with its old meaning.
+* Each API instance holds one `LISTEN` connection (`PgEventListener`). Notifications trigger a debounced pass, and a pass also runs every `EVENT_RECONCILE_MS` (2 s) regardless, so a dropped notification or listener connection only delays delivery. Passes are serialized; the watermark starts at the current xmin.
+* Delivery is **at-least-once**. Overlapping windows return some rows again; the bus and SSE drop them by seq, and a client reconnecting with its cursor may see repeats it must drop by seq. Postgres stays the source of truth.
+* Live-only `model.delta` chunks travel on `agentos_transient` and are never replayed.
+
+Verified with two API instances on real Postgres: delayed commits, 8 concurrent writers × 25 events with random commit delays, a mid-stream reconnect, and the listener's backend killed while a transaction was open (`apps/api/test/events.test.ts`).
 
 ## Observability
 
@@ -85,8 +87,8 @@ An API restart does not affect workflows. `recoverInterruptedTasks`, which marks
 
 Workers write a `WorkerHeartbeat` row every 5 s and can expose `GET /health` on `WORKER_HEALTH_PORT`. Logs are structured JSON with `event` names (`model_call`, `model_call_failed`, `activity_retry`, `activity_failed`, `run_failed`, `worker_started`, ...). Credential-bearing fields are redacted. Usage records store latency and attempt per model call.
 
-**Spending limits:** `maxCostUsd` on a task caps the whole task tree, including all runs and pipeline steps. It is checked before every model call, so a run can overshoot by at most one call's cost. The agent's own per-run budget still applies.
+**Spending limits (2C).** Before every provider request the engine reserves the worst-case cost of that request (input estimate plus `maxOutputTokens`, priced from the catalog, or `AGENTOS_UNPRICED_CALL_RESERVE_USD` when unpriced) in `ModelCallAttempt`, under a per-tree advisory lock. The request is refused with `budget.exceeded` (phase `before_call`) when committed spend plus open reservations plus this reservation would pass the run's or the tree's `maxCostUsd`. After the reply the reservation is settled at the reported cost. A reservation left open by a dead worker, or a reply that was never stored, is counted as spent and flagged `billing.possible_duplicate`. All figures are estimates from token counts and a static price list, not provider invoices.
 
 ## Production notes
 
-The dev server uses SQLite and is for development and tests only. Production uses a Temporal cluster or Temporal Cloud (set `TEMPORAL_ADDRESS` and `TEMPORAL_NAMESPACE`; mTLS is not wired yet), at least two workers per task queue, and a managed KMS (see `docs/credentials.md`). This milestone contains no deployment tooling, by design.
+Production requires `AGENTOS_WORKFLOW_ENGINE=temporal`; the in-process engine is refused. The connection supports TLS and mTLS (`TEMPORAL_TLS`, `TEMPORAL_TLS_CA_FILE`, `TEMPORAL_TLS_CERT_FILE`/`KEY_FILE`, `TEMPORAL_TLS_SERVER_NAME`) or a Temporal Cloud API key (`TEMPORAL_API_KEY`), retries connection with backoff (`TEMPORAL_CONNECT_ATTEMPTS`), and fails startup with a clear message. Step activities take `AGENTOS_STEP_TIMEOUT_MS` and `AGENTOS_STEP_MAX_ATTEMPTS`; `AGENTOS_WORKFLOW_RUN_TIMEOUT_MS` bounds a workflow run. Workers can register as Worker Deployment versions (`TEMPORAL_WORKER_VERSIONING=true` with `TEMPORAL_WORKER_BUILD_ID`), expose `/livez`, `/readyz` and `/metrics`, and drain on SIGTERM. Workflow code changes must pass the replay test against `apps/worker/test/fixtures/histories-2b/`. TLS was verified through a local TLS proxy in front of the dev server; **Temporal Cloud and a real mTLS cluster are not verified**. See `docs/deployment-runbook.md`.

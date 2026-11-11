@@ -344,8 +344,10 @@ describe("server-sent events", () => {
 
     // Reconnect with Last-Event-ID: receive exactly the events after `mid`.
     const replayed = await readSse(`${base}/api/v1/tasks/${t.body.id}/events/stream`, { cookie: a.cookie, "last-event-id": mid }, (evs) => evs.some((e) => e.event === "replay.done"));
-    const ids = replayed.filter((e) => e.id).map((e) => e.id);
-    expect(ids).toEqual(all.slice(5).map((e) => e.seq));
+    // Ids are resume cursors "<watermark>.<seq>" (milestone 2C); the seq part identifies the event.
+    const ids = replayed.filter((e) => e.id && e.event !== "replay.done").map((e) => e.id!);
+    for (const id of ids) expect(id).toMatch(/^\d+\.\d+$/);
+    expect(ids.map((id) => id.split(".")[1])).toEqual(all.slice(5).map((e) => e.seq));
 
     // Other organizations are refused.
     const denied = await fetch(`${base}/api/v1/tasks/${t.body.id}/events/stream`, { headers: { cookie: b.cookie } });

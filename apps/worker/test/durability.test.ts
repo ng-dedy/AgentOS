@@ -221,20 +221,32 @@ describe("multi-instance realtime events", () => {
       await a.waitStatus(t.id, "completed");
       await waitFor("run.completed on instance B", async () => sb.events.some((e) => e.event === "run.completed"));
       await sb.close();
-      const persisted = sb.events.filter((e) => e.id !== null);
-      const seqs = persisted.map((e) => BigInt(e.id!));
+      // SSE ids are resume cursors "<watermark>.<seq>" since milestone 2C.
+      const seqOf = (id: string) => id.split(".").at(-1)!;
+      const persisted = sb.events.filter((e) => e.id !== null && e.event !== "replay.done");
+      for (const e of persisted) expect(e.id).toMatch(/^\d+\.\d+$/);
+      const seqs = persisted.map((e) => BigInt(seqOf(e.id!)));
       expect(new Set(seqs.map(String)).size).toBe(seqs.length); // no duplicates
       expect([...seqs].sort((x, y) => (x < y ? -1 : 1))).toEqual(seqs); // in order
       expect(sb.events.some((e) => e.event === "model.delta")).toBe(true); // live-only deltas crossed processes
       const all = await a.events(t.id);
-      expect(persisted.map((e) => e.id)).toEqual(all.map((e) => e.seq));
+      expect(persisted.map((e) => seqOf(e.id!))).toEqual(all.map((e) => e.seq));
 
-      // Reconnect with Last-Event-ID from the middle: only later events, once each.
+      // Reconnect with a legacy numeric Last-Event-ID from the middle: only later events, once each.
       const mid = all[Math.floor(all.length / 2)]!.seq;
       const replay = openStream(b.url, a.cookie, `/tasks/${t.id}/events/stream`, mid);
       await waitFor("replay done", async () => replay.events.some((e) => e.event === "replay.done"));
       await replay.close();
-      expect(replay.events.filter((e) => e.id).map((e) => e.id)).toEqual(all.filter((e) => BigInt(e.seq) > BigInt(mid)).map((e) => e.seq));
+      const replayed = replay.events.filter((e) => e.id && e.event !== "replay.done").map((e) => seqOf(e.id!));
+      expect(replayed).toEqual(all.filter((e) => BigInt(e.seq) > BigInt(mid)).map((e) => e.seq));
+
+      // Reconnect with the stream's own resume cursor: nothing committed is missing (repeats allowed, deduped by seq).
+      const cursor = sb.events.filter((e) => e.id).at(-1)!.id!;
+      const resumed = openStream(b.url, a.cookie, `/tasks/${t.id}/events/stream`, cursor);
+      await waitFor("cursor replay done", async () => resumed.events.some((e) => e.event === "replay.done"));
+      await resumed.close();
+      const union = new Set([...persisted, ...resumed.events.filter((e) => e.id && e.event !== "replay.done")].map((e) => seqOf(e.id!)));
+      expect([...union].sort()).toEqual(all.map((e) => e.seq).sort());
 
       // The LISTEN connection is dropped by the database: the instance reconnects and catches up.
       const live = openStream(b.url, a.cookie, "/events/stream");

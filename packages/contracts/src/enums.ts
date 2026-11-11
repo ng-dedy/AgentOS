@@ -56,6 +56,7 @@ export const FailureCodeSchema = z.enum([
   "iteration_limit",
   "budget_exceeded",
   "token_limit",
+  "credential_unavailable",
   "interrupted",
   "step_failed",
   "execution_failed",
@@ -64,6 +65,7 @@ export const FailureCodeSchema = z.enum([
 export type FailureCode = z.infer<typeof FailureCodeSchema>;
 export const RETRYABLE_FAILURES: readonly FailureCode[] = [
   "provider_retryable_error",
+  "credential_unavailable",
   "provider_auth",
   "provider_quota",
   "interrupted",

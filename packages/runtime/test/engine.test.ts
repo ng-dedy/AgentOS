@@ -92,13 +92,31 @@ describe("agent execution lifecycle", () => {
     expect([...s.store.runs.values()][0]!.iterations).toBe(3);
   });
 
-  it("enforces the cost budget and still records the spend", async () => {
+  it("enforces the cost budget before the call when the worst case cannot fit (milestone 2C)", async () => {
     const a = s.store.addAgent({ organizationId: ORG, name: "A", model: "mock-expensive", maxRunCostUsd: 0.5 });
     const t = s.store.addTask({ organizationId: ORG, agentId: a.id, instruction: "What is 2 + 2?" });
     const outcome = await s.engine.execute(ORG, t.id);
     expect(outcome).toMatchObject({ status: "failed", failureCode: "budget_exceeded" });
-    expect(s.store.usage).toHaveLength(1);
-    expect(s.store.toolCalls.size).toBe(0); // stopped before running the requested tool
+    expect(s.store.usage).toHaveLength(0); // the provider was never called
+    expect(s.store.attempts).toHaveLength(0);
+    expect(s.store.events.find((e) => e.type === "budget.exceeded")?.payload).toMatchObject({ scope: "run", phase: "before_call", limitUsd: 0.5 });
+  });
+
+  it("still records the spend and stops when actual usage overshoots the estimate (backstop)", async () => {
+    class Inflating extends MockProvider {
+      override async generate(req: ModelRequest, o: Parameters<MockProvider["generate"]>[1]) {
+        const r = await super.generate(req, o);
+        return { ...r, usage: { ...r.usage, inputTokens: 1_000_000 } }; // $1 at the mock input price
+      }
+    }
+    const t2 = setup({ mock: new Inflating() });
+    const a = t2.store.addAgent({ organizationId: ORG, name: "A", maxRunCostUsd: 0.5 });
+    const t = t2.store.addTask({ organizationId: ORG, agentId: a.id, instruction: "What is 2 + 2?" });
+    const outcome = await t2.engine.execute(ORG, t.id);
+    expect(outcome).toMatchObject({ status: "failed", failureCode: "budget_exceeded" });
+    expect(t2.store.usage).toHaveLength(1);
+    expect(t2.store.toolCalls.size).toBe(0); // stopped before running the requested tool
+    expect(t2.store.events.find((e) => e.type === "budget.exceeded")?.payload).toMatchObject({ scope: "run", phase: "after_call" });
   });
 
   it("enforces the token budget", async () => {

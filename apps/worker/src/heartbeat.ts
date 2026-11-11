@@ -21,6 +21,13 @@ export class WorkerHeartbeat {
     this.timer = setInterval(() => void this.beat("running").catch(this.onError), this.intervalMs);
   }
 
+  /** Report "stopping" immediately (draining), keep the timer off so it is not overwritten. */
+  async markStopping(): Promise<void> {
+    if (this.timer) clearInterval(this.timer);
+    this.timer = null;
+    await this.beat("stopping").catch(this.onError);
+  }
+
   async stop(): Promise<void> {
     if (this.timer) clearInterval(this.timer);
     await this.beat("stopping").catch(this.onError);

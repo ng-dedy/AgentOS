@@ -4,7 +4,7 @@ import { RETRYABLE_FAILURES, TaskCreateSchema, TaskStatusSchema, TERMINAL_TASK_S
 import type { Prisma } from "@agentos/db";
 import type { AppDeps } from "../app";
 import { requireAuth } from "../auth/plugin";
-import { toRunEvent } from "@agentos/platform";
+import { readOrgEvents, readTreeEvents, toRunEvent } from "@agentos/platform";
 import { lastEventId, streamEvents } from "../events/sse";
 import { AppError, conflict, notFound, parse } from "../http/errors";
 import { audit, idempotent, money } from "../http/support";
@@ -206,27 +206,21 @@ export async function taskRoutes(app: FastifyInstance, deps: AppDeps) {
     await streamEvents(req, reply, bus, {
       orgId: organizationId,
       allowedOrigin: config.WEB_ORIGIN,
+      lifecycle: deps.lifecycle,
       filter: (e) => e.rootTaskId === root,
-      replay: async (after) =>
-        (await prisma.runEvent.findMany({ where: { organizationId, rootTaskId: root, seq: { gt: after } }, orderBy: { seq: "asc" }, take: 5000 })).map(toRunEvent),
+      replay: (cursor) => readTreeEvents(prisma, organizationId, root, cursor),
     });
   });
 
   app.get("/events/stream", { config: { rateLimit: false } }, async (req, reply) => {
     const { organizationId } = requireAuth(req);
     // The dashboard feed replays at most the last 50 events on first connect.
-    const after = lastEventId(req);
     await streamEvents(req, reply, bus, {
       orgId: organizationId,
       allowedOrigin: config.WEB_ORIGIN,
+      lifecycle: deps.lifecycle,
       filter: (e) => e.seq !== null,
-      replay: async (since) => {
-        if (after > 0n) {
-          return (await prisma.runEvent.findMany({ where: { organizationId, seq: { gt: since } }, orderBy: { seq: "asc" }, take: 500 })).map(toRunEvent);
-        }
-        const recent = await prisma.runEvent.findMany({ where: { organizationId }, orderBy: { seq: "desc" }, take: 50 });
-        return recent.reverse().map(toRunEvent);
-      },
+      replay: (cursor) => readOrgEvents(prisma, organizationId, cursor),
     });
   });
 

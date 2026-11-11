@@ -1,0 +1,65 @@
+# Reference manifests (milestone 2C). Not applied anywhere; adapt names, images and secrets.
+# Secrets: agentos-env (env vars from deploy/production.env.example), agentos-temporal-mtls (optional files).
+apiVersion: apps/v1
+kind: Deployment
+metadata: { name: agentos-api, labels: { app: agentos-api } }
+spec:
+  replicas: 2
+  selector: { matchLabels: { app: agentos-api } }
+  strategy: { rollingUpdate: { maxUnavailable: 0, maxSurge: 1 } }
+  template:
+    metadata: { labels: { app: agentos-api } }
+    spec:
+      serviceAccountName: agentos-app          # IRSA role with deploy/aws/app-iam-policy.json
+      terminationGracePeriodSeconds: 40        # > SHUTDOWN_DRAIN_MS + close time, < SHUTDOWN_FORCE_MS + margin
+      containers:
+        - name: api
+          image: <registry>/agentos:<git-commit>
+          command: ["pnpm", "--filter", "@agentos/api", "start"]
+          envFrom: [{ secretRef: { name: agentos-env } }]
+          ports: [{ containerPort: 4000 }]
+          readinessProbe: { httpGet: { path: /readyz, port: 4000 }, periodSeconds: 5, failureThreshold: 2 }
+          livenessProbe: { httpGet: { path: /livez, port: 4000 }, periodSeconds: 10, failureThreshold: 3 }
+          resources: { requests: { cpu: 250m, memory: 512Mi }, limits: { memory: 1Gi } }
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata: { name: agentos-worker, labels: { app: agentos-worker } }
+spec:
+  replicas: 2
+  selector: { matchLabels: { app: agentos-worker } }
+  template:
+    metadata: { labels: { app: agentos-worker } }
+    spec:
+      serviceAccountName: agentos-app
+      terminationGracePeriodSeconds: 75        # > WORKER_SHUTDOWN_FORCE_MS
+      containers:
+        - name: worker
+          image: <registry>/agentos:<git-commit>
+          command: ["pnpm", "--filter", "@agentos/worker", "start"]
+          envFrom: [{ secretRef: { name: agentos-env } }]
+          env: [{ name: TEMPORAL_WORKER_BUILD_ID, value: "<git-commit>" }]
+          ports: [{ containerPort: 9464, name: health }]
+          readinessProbe: { httpGet: { path: /readyz, port: 9464 }, periodSeconds: 5 }
+          livenessProbe: { httpGet: { path: /livez, port: 9464 }, periodSeconds: 10, failureThreshold: 3 }
+          resources: { requests: { cpu: 500m, memory: 768Mi }, limits: { memory: 1536Mi } }
+          volumeMounts: [{ name: temporal-mtls, mountPath: /run/secrets/temporal, readOnly: true }]
+      volumes:
+        - name: temporal-mtls
+          secret: { secretName: agentos-temporal-mtls, optional: true }
+---
+apiVersion: batch/v1
+kind: Job
+metadata: { name: agentos-migrate-<git-commit> }
+spec:
+  backoffLimit: 0
+  template:
+    spec:
+      restartPolicy: Never
+      containers:
+        - name: migrate
+          image: <registry>/agentos:<git-commit>
+          command: ["pnpm", "db:deploy"]
+          env:
+            - { name: DATABASE_URL, valueFrom: { secretKeyRef: { name: agentos-migrate, key: url } } }
+            - { name: PGOPTIONS, value: "-c lock_timeout=5s -c statement_timeout=15min" }

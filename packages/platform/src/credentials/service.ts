@@ -3,7 +3,8 @@ import type { PrismaClient } from "@agentos/db";
 import { ProviderError, type ProviderRegistry } from "@agentos/providers";
 import type { CredentialResolver } from "@agentos/runtime";
 import { openSecret, rewrapSecret, sealSecret } from "./envelope";
-import type { KeyManagementService } from "./kms";
+import { metrics } from "../observability/metrics";
+import { KmsConfigError, KmsIntegrityError, KmsUnavailableError, type KeyManagementService, type KmsContext } from "./kms";
 
 /** Providers that accept organization credentials. The mock never needs one. */
 export const CREDENTIAL_PROVIDERS = ["openai", "anthropic", "xai"] as const;
@@ -38,7 +39,34 @@ export class CredentialsUnavailableError extends Error {
 
 type Actor = { userId: string | null };
 
-const aadFor = (orgId: string, provider: string, id: string) => `agentos-credential|v1|${orgId}|${provider}|${id}`;
+const ctxFor = (orgId: string, provider: string, id: string): KmsContext => ({ organizationId: orgId, provider, credentialId: id, purpose: "provider-credential" });
+
+/**
+ * A stored credential could not be decrypted. `retryable` is true only when the KMS was
+ * unreachable or throttling; a wrong key, a missing permission or a tampered row is not
+ * retryable. The message never contains key material.
+ */
+export class CredentialDecryptError extends Error {
+  constructor(
+    readonly code: "KMS_CONFIG" | "KMS_INTEGRITY" | "KMS_UNAVAILABLE",
+    readonly retryable: boolean,
+    message: string,
+  ) {
+    super(message);
+  }
+}
+
+export interface CredentialServiceOptions {
+  allowDeploymentKeys: boolean;
+  deploymentSecrets?: { get(name: string): string | undefined };
+  /**
+   * Keep decrypted keys in this process for up to this long, so a run does not call the
+   * KMS on every model turn. The cache is keyed by row id + updatedAt + KEK id, so an
+   * update, rotation or deletion takes effect on the next call. 0 disables it.
+   */
+  cacheTtlMs?: number;
+  cacheMaxEntries?: number;
+}
 const hint = (key: string) => (key.length > 8 ? key.slice(-4) : "");
 
 /**
@@ -50,8 +78,27 @@ export class CredentialService implements CredentialResolver {
   constructor(
     private readonly prisma: PrismaClient,
     private readonly kms: KeyManagementService | null,
-    private readonly opts: { allowDeploymentKeys: boolean; deploymentSecrets?: { get(name: string): string | undefined } },
+    private readonly opts: CredentialServiceOptions,
   ) {}
+
+  /** Decrypted keys, see `cacheTtlMs`. Never logged, never serialized. */
+  private readonly cache = new Map<string, { value: string; expiresAt: number }>();
+
+  /** Drop every decrypted key held by this process (shutdown, tests). */
+  clearCache(): void {
+    this.cache.clear();
+  }
+
+  /** Round-trip a throwaway data key through the KMS (readiness). Null when storage is off. */
+  async selfTest(): Promise<{ ok: boolean; error?: string } | null> {
+    if (!this.kms) return null;
+    try {
+      await this.kms.selfTest();
+      return { ok: true };
+    } catch (err) {
+      return { ok: false, error: err instanceof Error ? err.message.slice(0, 200) : "KMS self-test failed" };
+    }
+  }
 
   get enabled(): boolean {
     return this.kms !== null;
@@ -112,20 +159,23 @@ export class CredentialService implements CredentialResolver {
     const kms = this.requireKms();
     const existing = await this.prisma.providerCredential.findUnique({ where: { organizationId_provider: { organizationId: orgId, provider } }, select: { id: true } });
     const id = existing?.id ?? randomUUID();
-    const env = await sealSecret(kms, apiKey, aadFor(orgId, provider, id));
+    const env = await sealSecret(kms, apiKey, ctxFor(orgId, provider, id));
     const data = { ...env, keyHint: hint(apiKey), status: "unverified", lastVerifiedAt: null, lastVerifyError: null, updatedById: actor.userId };
     if (existing) {
       await this.prisma.providerCredential.update({ where: { id }, data });
     } else {
       await this.prisma.providerCredential.create({ data: { id, organizationId: orgId, provider, createdById: actor.userId, ...data } });
     }
-    await this.audit(orgId, actor, existing ? "credential.updated" : "credential.created", provider, { keyHint: data.keyHint, kekId: env.kekId });
+    await this.audit(orgId, actor, existing ? "credential.updated" : "credential.created", provider, { keyHint: data.keyHint, kekId: env.kekId, kms: kms.name });
     return { created: !existing };
   }
 
   async delete(orgId: string, provider: CredentialProvider, actor: Actor): Promise<boolean> {
+    const row = await this.prisma.providerCredential.findUnique({ where: { organizationId_provider: { organizationId: orgId, provider } }, select: { id: true, kekId: true } });
     const r = await this.prisma.providerCredential.deleteMany({ where: { organizationId: orgId, provider } });
-    if (r.count > 0) await this.audit(orgId, actor, "credential.deleted", provider, {});
+    // The ciphertext and wrapped key go with the row; drop any decrypted copy in this process too.
+    if (row) for (const k of this.cache.keys()) if (k.startsWith(`${row.id}|`)) this.cache.delete(k);
+    if (r.count > 0) await this.audit(orgId, actor, "credential.deleted", provider, { kekId: row?.kekId ?? null });
     return r.count > 0;
   }
 
@@ -169,7 +219,7 @@ export class CredentialService implements CredentialResolver {
     const rows = await this.prisma.providerCredential.findMany({ where: { kekId: { not: active } } });
     let n = 0;
     for (const r of rows) {
-      const next = await rewrapSecret(kms, r, aadFor(r.organizationId, r.provider, r.id));
+      const next = await rewrapSecret(kms, r, ctxFor(r.organizationId, r.provider, r.id));
       // Compare-and-set on the old wrapping so a concurrent update is never overwritten.
       const u = await this.prisma.providerCredential.updateMany({
         where: { id: r.id, kekId: r.kekId, updatedAt: r.updatedAt },
@@ -187,7 +237,34 @@ export class CredentialService implements CredentialResolver {
     if (!this.kms) return null;
     const r = await this.prisma.providerCredential.findUnique({ where: { organizationId_provider: { organizationId: orgId, provider } } });
     if (!r || r.organizationId !== orgId) return null;
-    return openSecret(this.kms, r, aadFor(orgId, provider, r.id));
+    const ttl = this.opts.cacheTtlMs ?? 0;
+    const cacheKey = `${r.id}|${r.updatedAt.getTime()}|${r.kekId}`;
+    if (ttl > 0) {
+      const hit = this.cache.get(cacheKey);
+      if (hit && hit.expiresAt > Date.now()) {
+        metrics.inc("agentos_credential_resolutions_total", { outcome: "cache_hit" });
+        return hit.value;
+      }
+      if (hit) this.cache.delete(cacheKey);
+    }
+    let value: string;
+    try {
+      value = await openSecret(this.kms, r, ctxFor(orgId, provider, r.id));
+    } catch (err) {
+      const e = classifyDecryptError(err);
+      metrics.inc("agentos_credential_resolutions_total", { outcome: e.code.toLowerCase() });
+      // Integrity and configuration failures are security-relevant: record them for the org's owners.
+      if (!e.retryable) await this.audit(orgId, { userId: null }, "credential.decrypt_failed", provider, { code: e.code, kekId: r.kekId, kms: this.kms.name }).catch(() => undefined);
+      throw e;
+    }
+    metrics.inc("agentos_credential_resolutions_total", { outcome: "decrypted" });
+    if (ttl > 0) {
+      // Drop stale versions of this row and keep the cache bounded.
+      for (const k of this.cache.keys()) if (k.startsWith(`${r.id}|`)) this.cache.delete(k);
+      if (this.cache.size >= (this.opts.cacheMaxEntries ?? 1000)) this.cache.delete(this.cache.keys().next().value!);
+      this.cache.set(cacheKey, { value, expiresAt: Date.now() + ttl });
+    }
+    return value;
   }
 
   private deploymentKey(provider: CredentialProvider): string | null {
@@ -213,4 +290,12 @@ export class CredentialService implements CredentialResolver {
       },
     });
   }
+}
+
+function classifyDecryptError(err: unknown): CredentialDecryptError {
+  if (err instanceof KmsUnavailableError) return new CredentialDecryptError("KMS_UNAVAILABLE", true, err.message);
+  if (err instanceof KmsConfigError) return new CredentialDecryptError("KMS_CONFIG", false, err.message);
+  if (err instanceof KmsIntegrityError) return new CredentialDecryptError("KMS_INTEGRITY", false, err.message);
+  // AES-GCM authentication failure: the ciphertext or its context was altered.
+  return new CredentialDecryptError("KMS_INTEGRITY", false, "Stored credential failed integrity verification");
 }
