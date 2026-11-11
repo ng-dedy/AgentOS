@@ -11,9 +11,18 @@ export interface TaskInput {
 export interface WorkflowInput extends TaskInput {
   options?: WorkflowOptions;
 }
+/**
+ * Recorded in history with the workflow input, so replay stays deterministic. Every field
+ * is optional and defaults to the milestone 2B value, so histories started before a field
+ * existed replay unchanged (see the committed history fixtures).
+ */
 export interface WorkflowOptions {
   /** How long an activity may go without a heartbeat before it is retried elsewhere. Default 30 s. */
   heartbeatTimeoutMs?: number;
+  /** start-to-close timeout of one model or tool step. Default 15 min. */
+  stepTimeoutMs?: number;
+  /** Infrastructure retries of one step. Default 5. */
+  stepMaxAttempts?: number;
 }
 export interface RunInput extends TaskInput {
   runId: string;

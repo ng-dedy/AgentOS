@@ -34,7 +34,7 @@ export interface RuntimeOptions {
 }
 
 /** Everything that executes agent runs, wired to Postgres. Shared by the API and the worker. */
-export function createRuntime(opts: RuntimeOptions): Runtime {
+export async function createRuntime(opts: RuntimeOptions): Promise<Runtime> {
   const { prisma, config } = opts;
   const secrets = opts.secrets ?? new EnvSecretsProvider(opts.env);
   const providers =
@@ -50,8 +50,12 @@ export function createRuntime(opts: RuntimeOptions): Runtime {
   const bus = new EventBus();
   const store = new PrismaRunStore(prisma);
   const sink = new PrismaEventSink(prisma, bus, { crossProcess: opts.crossProcessEvents });
-  const kms = opts.kms === undefined ? createKms(opts.env) : opts.kms;
-  const credentials = new CredentialService(prisma, kms, { allowDeploymentKeys: config.AGENTOS_ALLOW_DEPLOYMENT_KEYS, deploymentSecrets: secrets });
+  const kms = opts.kms === undefined ? await createKms(opts.env ?? process.env) : opts.kms;
+  const credentials = new CredentialService(prisma, kms, {
+    allowDeploymentKeys: config.AGENTOS_ALLOW_DEPLOYMENT_KEYS,
+    deploymentSecrets: secrets,
+    cacheTtlMs: config.AGENTOS_CREDENTIAL_CACHE_TTL_MS,
+  });
   const engine = new AgentEngine({
     store,
     events: sink,
@@ -62,6 +66,7 @@ export function createRuntime(opts: RuntimeOptions): Runtime {
     retryBaseDelayMs: opts.engineOverrides?.retryBaseDelayMs,
     providerTimeoutMs: opts.engineOverrides?.providerTimeoutMs ?? config.PROVIDER_TIMEOUT_MS,
     providerRetries: config.PROVIDER_MAX_RETRIES,
+    unpricedCallReserveUsd: config.AGENTOS_UNPRICED_CALL_RESERVE_USD,
   });
   const pipelines = new PipelineCoordinator(store, sink);
   return { providers, tools, bus, sink, store, credentials, engine, pipelines };

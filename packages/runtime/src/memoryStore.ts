@@ -11,7 +11,39 @@ import type {
   RunStore,
   TaskRecord,
   ToolCallRecord,
+  ReserveModelCallInput,
+  ReserveModelCallResult,
+  SpendSnapshot,
 } from "./store";
+
+export interface MemoryAttempt {
+  id: string;
+  organizationId: string;
+  rootTaskId: string;
+  taskId: string;
+  runId: string;
+  turn: number;
+  sequence: number;
+  activityAttempt: number | null;
+  provider: string;
+  model: string;
+  status: "reserved" | "succeeded" | "failed" | "orphaned";
+  reservedUsd: number;
+  actualUsd: number | null;
+  inputTokens: number | null;
+  outputTokens: number | null;
+  recorded: boolean;
+  billingUnknown: boolean;
+  possibleDuplicate: boolean;
+  error: string | null;
+}
+
+/** Ledger rows that count against limits beyond the recorded usage. Same rule as the Prisma store. */
+export function unaccountedUsd(a: Pick<MemoryAttempt, "status" | "reservedUsd" | "actualUsd" | "recorded" | "billingUnknown">): number {
+  if (a.status === "reserved" || a.status === "orphaned") return a.reservedUsd;
+  if (a.status === "failed") return a.billingUnknown ? a.reservedUsd : 0;
+  return a.recorded ? 0 : (a.actualUsd ?? a.reservedUsd);
+}
 
 let seq = 0;
 const nextId = (p: string) => `${p}_${(++seq).toString(36)}`;
@@ -34,6 +66,7 @@ export class MemoryRunStore implements RunStore, EventSink {
   toolExecutions = new Map<string, number>();
   events: RunEvent[] = [];
   transient: NewEvent[] = [];
+  attempts: MemoryAttempt[] = [];
   private eventSeq = 0;
 
   addAgent(a: Partial<AgentConfig> & Pick<AgentConfig, "organizationId" | "name">): AgentConfig {
@@ -218,6 +251,60 @@ export class MemoryRunStore implements RunStore, EventSink {
     }
     return n;
   }
+  async reserveModelCall(orgId: string, input: ReserveModelCallInput): Promise<ReserveModelCallResult> {
+    // Single-threaded: no lock needed.
+    const orphaned = this.attempts.filter((a) => a.organizationId === orgId && a.runId === input.runId && a.turn === input.turn && a.status === "reserved");
+    for (const o of orphaned) o.status = "orphaned";
+    const lostReplies = this.attempts.filter((a) => a.runId === input.runId && a.turn === input.turn && a.status === "succeeded" && !a.recorded).length;
+    const tree = await this.spend(orgId, input.rootTaskId, null);
+    const run = await this.spend(orgId, input.rootTaskId, input.runId);
+    const orphanInfo = orphaned.map((o) => ({ id: o.id, turn: o.turn, sequence: o.sequence, reservedUsd: o.reservedUsd, activityAttempt: o.activityAttempt }));
+    const over = (limit: number | null, snap: SpendSnapshot) => limit !== null && snap.recordedUsd + snap.unaccountedUsd + input.reservedUsd > limit + 1e-9;
+    if (over(input.treeLimitUsd, tree)) return { ok: false, scope: "task", limitUsd: input.treeLimitUsd!, tree, run, reservedUsd: input.reservedUsd, orphaned: orphanInfo };
+    if (over(input.runLimitUsd, run)) return { ok: false, scope: "run", limitUsd: input.runLimitUsd!, tree, run, reservedUsd: input.reservedUsd, orphaned: orphanInfo };
+    const sequence = this.attempts.filter((a) => a.runId === input.runId && a.turn === input.turn).length + 1;
+    const a: MemoryAttempt = {
+      id: nextId("mca"),
+      organizationId: orgId,
+      ...input,
+      sequence,
+      status: "reserved",
+      actualUsd: null,
+      inputTokens: null,
+      outputTokens: null,
+      recorded: false,
+      billingUnknown: false,
+      possibleDuplicate: orphaned.length > 0 || lostReplies > 0,
+      error: null,
+    };
+    this.attempts.push(a);
+    return { ok: true, attemptId: a.id, sequence, orphaned: orphanInfo, lostReplies, tree, run };
+  }
+
+  async settleModelCall(orgId: string, attemptId: string, patch: Parameters<RunStore["settleModelCall"]>[2]) {
+    const a = this.attempts.find((x) => x.id === attemptId && x.organizationId === orgId);
+    if (!a || a.status !== "reserved") return;
+    a.status = patch.status;
+    a.actualUsd = patch.actualUsd ?? null;
+    a.inputTokens = patch.inputTokens ?? null;
+    a.outputTokens = patch.outputTokens ?? null;
+    a.billingUnknown = patch.billingUnknown ?? false;
+    a.error = patch.error ?? null;
+  }
+
+  async markModelCallRecorded(orgId: string, attemptId: string) {
+    const a = this.attempts.find((x) => x.id === attemptId && x.organizationId === orgId);
+    if (a) a.recorded = true;
+  }
+
+  private async spend(orgId: string, rootTaskId: string, runId: string | null): Promise<SpendSnapshot> {
+    const recordedUsd = runId ? (this.runs.get(runId)?.costUsd ?? 0) : await this.getTreeSpend(orgId, rootTaskId);
+    const unaccounted = this.attempts
+      .filter((a) => a.organizationId === orgId && a.rootTaskId === rootTaskId && (runId === null || a.runId === runId))
+      .reduce((sum, a) => sum + unaccountedUsd(a), 0);
+    return { recordedUsd, unaccountedUsd: unaccounted };
+  }
+
   async recordUsage(orgId: string, input: Parameters<RunStore["recordUsage"]>[1]) {
     this.usage.push({ organizationId: orgId, runId: input.runId, costUsd: input.costUsd, inputTokens: input.inputTokens, outputTokens: input.outputTokens, cachedTokens: input.cachedTokens, latencyMs: input.latencyMs });
   }

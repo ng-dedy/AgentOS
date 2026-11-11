@@ -94,7 +94,11 @@ export async function waitFor<T>(what: string, fn: () => Promise<T | null | unde
 
 export async function startWorker(env: Record<string, string> = {}): Promise<Proc> {
   const p = spawnProc("worker", join(ROOT, "apps/worker"), "src/main.ts", env);
-  await waitFor("worker to start", async () => p.logs.join("").includes("worker started") || (p.child.exitCode !== null && Promise.reject(new Error(p.logs.join("")))), 60_000);
+  // Fail fast if the process exits before it reports "worker started" (e.g. refused config).
+  const exitedEarly = p.exited.then((code) => {
+    if (!p.logs.join("").includes("worker started")) throw new Error(`worker exited with ${code} before starting:\n${p.logs.join("")}`);
+  });
+  await Promise.race([waitFor("worker to start", async () => p.logs.join("").includes("worker started"), 60_000), exitedEarly]);
   return p;
 }
 

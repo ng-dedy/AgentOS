@@ -1,44 +1,69 @@
 import type { RunEvent } from "@agentos/contracts";
 import type { PrismaClient } from "@agentos/db";
 import type { EventSink, NewEvent } from "@agentos/runtime";
+import { metrics } from "../observability/metrics";
 
 type Listener = (event: RunEvent) => void;
+/** Called after a reconciliation pass: every committed event with txid < watermark has been delivered. */
+type WatermarkListener = (watermark: bigint) => void;
+interface Subscriber {
+  onEvent: Listener;
+  onWatermark?: WatermarkListener;
+}
 
 /**
  * Per-process pub/sub keyed by organization. Correctness never depends on it:
  * every persisted event can be replayed from the database. Across processes it is
- * fed by `PgEventListener` (Postgres LISTEN/NOTIFY), so an event written by a worker
- * or another API instance reaches every instance. A persisted event can arrive twice
- * (local publish and NOTIFY); the bus drops repeats by seq.
+ * fed by `PgEventListener` (Postgres LISTEN/NOTIFY plus reconciliation reads), so an
+ * event written by a worker or another API instance reaches every instance. A persisted
+ * event can arrive more than once (local publish, notification, reconciliation); the bus
+ * drops repeats by seq.
  */
 export class EventBus {
-  private readonly listeners = new Map<string, Set<Listener>>();
+  private readonly listeners = new Map<string, Set<Subscriber>>();
   private readonly recent = new Set<string>();
 
-  subscribe(orgId: string, listener: Listener): () => void {
+  subscribe(orgId: string, listener: Listener, onWatermark?: WatermarkListener): () => void {
     let set = this.listeners.get(orgId);
     if (!set) {
       set = new Set();
       this.listeners.set(orgId, set);
     }
-    set.add(listener);
+    const sub: Subscriber = { onEvent: listener, onWatermark };
+    set.add(sub);
     return () => {
-      set.delete(listener);
+      set.delete(sub);
       if (set.size === 0) this.listeners.delete(orgId);
     };
   }
 
   publish(orgId: string, event: RunEvent) {
     if (event.seq !== null) {
-      if (this.recent.has(event.seq)) return;
+      if (this.recent.has(event.seq)) {
+        metrics.inc("agentos_events_duplicates_dropped_total", { at: "bus" });
+        return;
+      }
       this.recent.add(event.seq);
       if (this.recent.size > 20_000) this.recent.delete(this.recent.values().next().value!);
     }
     for (const l of this.listeners.get(orgId) ?? []) {
       try {
-        l(event);
+        l.onEvent(event);
       } catch {
         // a broken subscriber must not affect the run
+      }
+    }
+  }
+
+  /** Tell current subscribers of these organizations that the listener's watermark advanced. */
+  publishWatermark(orgIds: string[], watermark: bigint) {
+    for (const orgId of orgIds) {
+      for (const l of this.listeners.get(orgId) ?? []) {
+        try {
+          l.onWatermark?.(watermark);
+        } catch {
+          // ignore
+        }
       }
     }
   }

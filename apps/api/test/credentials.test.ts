@@ -2,7 +2,7 @@ import { randomBytes } from "node:crypto";
 import { createServer, type Server } from "node:http";
 import type { AddressInfo } from "node:net";
 import { Writable } from "node:stream";
-import { CredentialService, LocalDevKms, KmsConfigError } from "@agentos/platform";
+import { CredentialDecryptError, CredentialService, LocalDevKms, KmsConfigError } from "@agentos/platform";
 import { createProviderRegistry } from "@agentos/providers";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { buildApp, LOG_REDACT_PATHS } from "../src/app";
@@ -169,7 +169,9 @@ describe("organization provider credentials", () => {
     expect(await onlyNew.resolve(a.orgId, "openai")).toBe(KEY_A);
     expect(await onlyNew.resolve(b.orgId, "openai")).toBe(KEY_B);
     const onlyOld = new CredentialService(db(), new LocalDevKms(`k1:${K1}`, { env: {} }), { allowDeploymentKeys: false });
-    await expect(onlyOld.resolve(a.orgId, "openai")).rejects.toThrow(KmsConfigError);
+    // The missing KEK surfaces as a non-retryable configuration error (never as key material).
+    await expect(onlyOld.resolve(a.orgId, "openai")).rejects.toThrow(CredentialDecryptError);
+    await expect(onlyOld.resolve(a.orgId, "openai")).rejects.toMatchObject({ code: "KMS_CONFIG", retryable: false });
     expect((await db().auditLog.findMany({ where: { action: "credential.rotated" } })).length).toBeGreaterThanOrEqual(2);
   });
 

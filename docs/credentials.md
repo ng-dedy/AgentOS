@@ -15,24 +15,26 @@ Because the AAD names the owner, a ciphertext copied to another workspace's row 
 
 ## Key management
 
-`KeyManagementService` has three operations: `wrap`, `unwrap` and `activeKeyId`.
+`KeyManagementService` (`packages/platform/src/credentials/kms.ts`) has `generateDataKey`, `wrap`, `unwrap`, `activeKeyId` and `selfTest`. `AGENTOS_KMS_PROVIDER` picks the implementation; there is no silent fallback between them.
 
-* **`LocalDevKms` (development only).** KEKs come from `AGENTOS_DEV_KMS_KEYS` (`id:base64key,...`, 32-byte keys, the last one is active). It refuses to start when `NODE_ENV=production` unless `AGENTOS_DEV_KMS_ALLOW_PRODUCTION=true` is set deliberately. The UI and the logs say it is a development KMS. Generate a key with `openssl rand -base64 32`.
-* **Production.** Implement the same interface on AWS KMS (`Encrypt`/`Decrypt` with `EncryptionContext`), GCP Cloud KMS (`additionalAuthenticatedData`) or Vault Transit (`context`). None of these could be reached from the build environment, so none is implemented or verified yet.
+* **`aws` (production, Milestone 2C).** `AwsKms` calls `GenerateDataKey` (AES_256) on write and `Decrypt` on read, with `KeyId` pinned to `AGENTOS_AWS_KMS_KEY_ID` or one of `AGENTOS_AWS_KMS_PREVIOUS_KEY_IDS`. A row naming any other key is refused before a KMS call. Every call carries the encryption context `{scheme, purpose, organizationId, provider, credentialId}`, so AWS itself refuses a wrapped key moved to another organization's row, and CloudTrail records the organization for each decrypt. The AES-GCM AAD on the secret is unchanged from 2B. AWS errors are classified: `AccessDenied`, `Disabled`, `KMSInvalidState`, `NotFound` are configuration errors (not retried); `InvalidCiphertext`/`IncorrectKey` are integrity errors (audited as `credential.decrypt_failed`); throttling, internal and network errors are retryable. Messages never contain payloads. The IAM and key policies are in `deploy/aws/`.
+* **`local-dev` (development and tests).** KEKs come from `AGENTOS_DEV_KMS_KEYS` (`id:base64key,...`). It refuses to start in production, and the old `AGENTOS_DEV_KMS_ALLOW_PRODUCTION` override was removed: setting it is a startup error.
+* **Unset.** Credential storage is disabled outside production (writes return 503). In production, startup fails.
 
-Without a KMS configured, credential storage is disabled. The API returns 503 for writes and the UI says so.
+Workers cache a decrypted key in memory for `AGENTOS_CREDENTIAL_CACHE_TTL_MS` (60 s default, 0 disables), keyed by credential id, `updatedAt` and KEK id, so an update or rotation is never served stale. The cache is cleared on delete and on shutdown. A non-retryable decrypt failure stops the run with `credential_unavailable` instead of retrying.
+
+Verified against moto's KMS emulator (`AGENTOS_TEST_KMS_ENDPOINT`) and a fake client; **not verified against real AWS KMS**.
 
 ## Rotation
 
-To rotate the KEK, re-wrap every data key. The ciphertexts do not change, so this is safe while tasks are running.
+**AWS KMS.** Automatic key rotation on the CMK needs nothing from AgentOS: old ciphertexts keep decrypting under the same key id. To move to a different CMK, set `AGENTOS_AWS_KMS_KEY_ID=<new>` and `AGENTOS_AWS_KMS_PREVIOUS_KEY_IDS=<old>`, restart, run `pnpm --filter @agentos/api credentials:rotate`, and when `remaining` is 0 remove the old id. See `docs/deployment-runbook.md`.
+
+**Development KMS.** Re-wrap every data key; the ciphertexts do not change, so this is safe while tasks run.
 
 ```bash
-# 1. add the new KEK and make it active (last entry, or AGENTOS_DEV_KMS_ACTIVE_KEY)
-AGENTOS_DEV_KMS_KEYS="k1:<old>,k2:<new>"
-# 2. restart API and workers with that value
-# 3. re-wrap (audited per credential; prints {"activeKeyId","rewrapped","remaining"})
+AGENTOS_DEV_KMS_KEYS="k1:<old>,k2:<new>"   # new key last = active
 pnpm --filter @agentos/api credentials:rotate
-# 4. when remaining is 0, remove k1
+# when remaining is 0, remove k1
 ```
 
 Replacing a provider key is a separate operation: the owner saves a new key in Settings.

@@ -19,13 +19,13 @@ export const stateQuery = defineQuery<AgentWorkflowState>("state");
 
 // Business failures (budget, refusal, auth, invalid tool...) come back as values, so
 // these retries only cover infrastructure faults: a crashed worker, a lost DB connection.
-function stepActivities(heartbeatTimeoutMs: number) {
+function stepActivities(options: WorkflowInput["options"]) {
   return proxyActivities<AgentActivities>({
     // A model turn includes the engine's own provider retries and backoff.
-    startToCloseTimeout: "15 minutes",
+    startToCloseTimeout: options?.stepTimeoutMs ?? "15 minutes",
     // A dead worker is detected within the heartbeat timeout and the step moves to another worker.
-    heartbeatTimeout: heartbeatTimeoutMs,
-    retry: { maximumAttempts: 5, initialInterval: "1 second", backoffCoefficient: 2, maximumInterval: "30 seconds" },
+    heartbeatTimeout: options?.heartbeatTimeoutMs ?? 30_000,
+    retry: { maximumAttempts: options?.stepMaxAttempts ?? 5, initialInterval: "1 second", backoffCoefficient: 2, maximumInterval: "30 seconds" },
     cancellationType: ActivityCancellationType.WAIT_CANCELLATION_COMPLETED,
   });
 }
@@ -44,7 +44,7 @@ const RECHECK_MAX_MS = 30 * 60_000;
  */
 export async function agentTaskWorkflow(args: WorkflowInput): Promise<TerminalOutcome> {
   const input: TaskInput = { orgId: args.orgId, taskId: args.taskId };
-  const steps = stepActivities(args.options?.heartbeatTimeoutMs ?? 30_000);
+  const steps = stepActivities(args.options);
   const state: AgentWorkflowState = { phase: "starting", runId: null, turn: 0, waitingOn: [], approvalSignals: 0 };
   setHandler(approvalDecided, () => {
     state.approvalSignals++;

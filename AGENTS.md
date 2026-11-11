@@ -54,7 +54,7 @@ See `docs/package-map.md`. Enforced by `node scripts/check-boundaries.mjs` (part
 
 ## Security requirements
 
-* Provider keys are per organization (`ProviderCredential`), envelope-encrypted with AES-256-GCM (Node `crypto`, no custom crypto). The data key is wrapped by a `KeyManagementService`; `LocalDevKms` is development-only. AAD binds each ciphertext to org, provider and row id. Keys are write-only over the API (only a 4-character hint comes back), owner-only to manage, audited, and never logged.
+* Provider keys are per organization (`ProviderCredential`), envelope-encrypted with AES-256-GCM (Node `crypto`, no custom crypto). The data key is wrapped by a `KeyManagementService`: `AwsKms` in production (encryption context binds org, provider and credential), `LocalDevKms` for development only and refused in production with no override. AAD binds each ciphertext to org, provider and row id. Keys are write-only over the API (only a 4-character hint comes back), owner-only to manage, audited, and never logged.
 * A model call for an organization uses that organization's key. Deployment env keys are used only when `AGENTOS_ALLOW_DEPLOYMENT_KEYS=true`; there is never a fallback to another organization's key.
 * Agents can only call tools on their allowlist **and** in the registry; the check is in code (`AgentEngine.handleToolCall`), not in prompts.
 * Tools with `requiresApproval` pause the run until a human decides. No agent-accessible tool may modify agent configuration, permissions, budgets or policies.
@@ -64,6 +64,8 @@ See `docs/package-map.md`. Enforced by `node scripts/check-boundaries.mjs` (part
 * Side-effecting POSTs support `Idempotency-Key`. Tool calls are unique per `(runId, providerCallId)`.
 * Provider adapters must pass an explicit `baseURL` to their SDK. SDKs read `OPENAI_BASE_URL` / `ANTHROPIC_BASE_URL` from the environment by default, which can send keys to an unintended host.
 * Catalog prices must come from the provider's published price list with `priceSourceUrl` and `priceCheckedAt`; never invent model ids or prices. Costs are always shown as estimates.
+* Production startup must go through `assertSafeConfiguration` (`packages/platform/src/productionConfig.ts`). A new setting that is unsafe in production gets a rule and a test there. Never add a silent fallback from a production component to a development one.
+* Never log plaintext keys, data keys, KMS payloads or connection strings. `/readyz` returns booleans only; `/metrics` needs `AGENTOS_METRICS_TOKEN`.
 * The MOCK provider is a scripted test double. It must stay visibly labelled everywhere it appears and must never be presented as an AI model.
 
 ## Testing requirements
@@ -73,6 +75,8 @@ See `docs/package-map.md`. Enforced by `node scripts/check-boundaries.mjs` (part
 * Playwright covers the primary user workflow end to end against the real API, a separate worker on Temporal, and the production web build.
 * Durability tests (`pnpm test:durability`) run the API and worker as real processes against Postgres and a Temporal server and kill them mid-run. Use the MOCK provider there so recovery is deterministic.
 * Live provider tests (`pnpm test:live`, `pnpm test:e2e:live`) call real APIs and cost money. They are skipped unless `AGENTOS_LIVE_TESTS=1` and the provider key is set. Never mark a provider "verified" without a passing live run, and never print or commit keys from them.
+* AWS KMS tests run against moto's KMS emulator when `AGENTOS_TEST_KMS_ENDPOINT` is set (`moto_server -p 5055`, then `AGENTOS_TEST_KMS_ENDPOINT=http://127.0.0.1:5055`); without it they skip. They do not prove real AWS behaviour.
+* Event delivery changes must keep `apps/api/test/events.test.ts` green (delayed commits, concurrent writers, listener kill). Workflow code changes must keep the replay test in `apps/worker/test/temporal-production.test.ts` green against `apps/worker/test/fixtures/histories-2b/`; never edit those fixtures to make it pass.
 * Every significant feature ships with automated tests. Do not skip, disable or loosen a test to get green.
 
 ## Verification procedure
@@ -85,8 +89,8 @@ pnpm db:deploy                                # apply migrations to DATABASE_URL
 DATABASE_URL=$TEST_DATABASE_URL pnpm db:deploy
 pnpm typecheck                                # tsc --noEmit in every package
 pnpm lint                                     # ESLint + package boundary check
-pnpm test                                     # unit + API integration tests
-pnpm test:durability                          # process-kill recovery tests (needs Temporal on :7233)
+pnpm test                                     # unit + API integration tests (+ AGENTOS_TEST_KMS_ENDPOINT for KMS)
+pnpm test:durability                          # process-kill, TLS, versioning replay, drain (needs Temporal on :7233)
 pnpm test:e2e                                 # Playwright on Temporal + worker (creates/resets agentos_e2e)
 ```
 

@@ -1,0 +1,24 @@
+{
+  "Version": "2012-10-17",
+  "Id": "agentos-credentials-key",
+  "Statement": [
+    {
+      "Sid": "KeyAdministration",
+      "Effect": "Allow",
+      "Principal": { "AWS": "arn:aws:iam::ACCOUNT_ID:role/agentos-kms-admin" },
+      "Action": ["kms:Describe*", "kms:Get*", "kms:List*", "kms:Enable*", "kms:Disable*", "kms:Put*", "kms:Update*", "kms:Revoke*", "kms:TagResource", "kms:UntagResource", "kms:ScheduleKeyDeletion", "kms:CancelKeyDeletion", "kms:EnableKeyRotation"],
+      "Resource": "*"
+    },
+    {
+      "Sid": "AgentOSEnvelopeEncryptionOnly",
+      "Effect": "Allow",
+      "Principal": { "AWS": "arn:aws:iam::ACCOUNT_ID:role/agentos-app" },
+      "Action": ["kms:GenerateDataKey", "kms:Encrypt", "kms:Decrypt"],
+      "Resource": "*",
+      "Condition": {
+        "StringEquals": { "kms:EncryptionContext:scheme": "agentos-envelope-v1" },
+        "ForAllValues:StringEquals": { "kms:EncryptionContextKeys": ["scheme", "purpose", "organizationId", "provider", "credentialId"] }
+      }
+    }
+  ]
+}

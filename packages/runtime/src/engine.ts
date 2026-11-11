@@ -46,6 +46,37 @@ export interface EngineOptions {
   /** Jitter source, injectable for tests. */
   random?: () => number;
   logger?: EngineLogger;
+  /**
+   * Reservation for one request to a model with no catalog price, in USD. Default 0: such a
+   * call cannot be bounded in advance, which is reported on the attempt (`priced: false`).
+   */
+  unpricedCallReserveUsd?: number;
+}
+
+/** Provider error kinds after which the provider may still have charged for the request. */
+const POSSIBLY_BILLED_KINDS = new Set(["timeout", "network", "stream_interrupted", "aborted", "unknown"]);
+
+/**
+ * Conservative upper bound for one request. Output is bounded exactly by the
+ * `maxOutputTokens` we send. Input is estimated from the serialized prompt at 3 characters
+ * per token (real tokenizers average about 4 for English, so this over-estimates), plus a
+ * 20% margin. It is an estimate: providers do not return a price, and tokenization of
+ * images, tool schemas or non-English text can differ.
+ */
+export function estimateMaxRequestCost(
+  catalog: { find(provider: string, model: string): { inputPerMTok: number; outputPerMTok: number } | undefined },
+  provider: string,
+  model: string,
+  req: { system?: string; messages: unknown; tools?: unknown; maxOutputTokens?: number },
+  unpricedReserveUsd = 0,
+): { usd: number; priced: boolean; estimatedInputTokens: number; maxOutputTokens: number } {
+  const chars = (req.system?.length ?? 0) + JSON.stringify(req.messages ?? []).length + JSON.stringify(req.tools ?? []).length;
+  const estimatedInputTokens = Math.ceil((chars / 3) * 1.2) + 50;
+  const maxOutputTokens = req.maxOutputTokens ?? 4096;
+  const e = catalog.find(provider, model);
+  if (!e) return { usd: unpricedReserveUsd, priced: false, estimatedInputTokens, maxOutputTokens };
+  const usd = (estimatedInputTokens * e.inputPerMTok + maxOutputTokens * e.outputPerMTok) / 1_000_000;
+  return { usd: Math.round(usd * 1e6) / 1e6, priced: true, estimatedInputTokens, maxOutputTokens };
 }
 
 export interface EngineLogger {
@@ -79,6 +110,11 @@ export interface StepContext {
   /** Which attempt of this step this is (1 = first). Used for retry history. */
   attempt?: number;
 }
+
+/** Process-wide counters for metrics (budget stops and possible duplicate billing). */
+export const budgetStats = { exceeded: 0, possibleDuplicates: 0 };
+
+const round6 = (n: number) => Math.round(n * 1e6) / 1e6;
 
 class RunStop extends Error {
   constructor(
@@ -271,11 +307,10 @@ export class AgentEngine {
         if (run.iterations >= agent.maxIterations) {
           throw new RunStop({ status: "failed", failureCode: "iteration_limit", message: `Stopped after ${agent.maxIterations} model iterations` });
         }
-        await this.checkTreeBudget(task);
-        response = await this.callAndRecord(task, agent, provider, run, ctx);
+        response = await this.callAndRecord(task, agent, provider, run, ctx, turn);
       }
 
-      this.checkRunLimits(agent, run);
+      await this.checkRunLimits(task, agent, run);
       if (response.stopReason === "refusal") {
         const refusal = (response as ModelResponse).refusal;
         throw new RunStop(
@@ -422,21 +457,27 @@ export class AgentEngine {
 
   private async isProviderConfigured(orgId: string, provider: ModelProvider): Promise<boolean> {
     if (provider.isMock || !this.opts.credentials) return provider.isConfigured();
-    return (await this.opts.credentials.resolve(orgId, provider.id)) !== null;
+    try {
+      return (await this.opts.credentials.resolve(orgId, provider.id)) !== null;
+    } catch (err) {
+      if ((err as { retryable?: boolean } | null)?.retryable === true) throw err;
+      // A stored key exists but cannot be decrypted: let the model step fail with the specific reason.
+      return true;
+    }
   }
 
-  private async callAndRecord(task: TaskRecord, agent: AgentConfig, provider: ModelProvider, run: RunRecord, ctx: StepContext): Promise<ModelResponse> {
+  private async callAndRecord(task: TaskRecord, agent: AgentConfig, provider: ModelProvider, run: RunRecord, ctx: StepContext, turn: number): Promise<ModelResponse> {
     const { store, tools } = this.opts;
     const orgId = task.organizationId;
     const allowed = agent.allowedTools.filter((n) => tools.has(n));
     const catalogEntry = this.opts.providers.catalog.find(agent.provider, agent.model);
     const messages = await store.loadMessages(orgId, task.conversationId!);
-    const apiKey = provider.isMock || !this.opts.credentials ? undefined : ((await this.opts.credentials.resolve(orgId, provider.id)) ?? undefined);
+    const apiKey = provider.isMock || !this.opts.credentials ? undefined : ((await this.resolveKey(orgId, provider)) ?? undefined);
     if (!provider.isMock && this.opts.credentials && !apiKey) {
       throw new RunStop({ status: "failed", failureCode: "provider_not_configured", message: `Provider '${agent.provider}' is not configured for this organization` });
     }
     const started = Date.now();
-    const response = await this.callModel(task, run, provider, ctx, apiKey, {
+    const { response, attemptId } = await this.callModel(task, agent, run, provider, ctx, apiKey, turn, {
       model: agent.model,
       system: buildSystemPrompt(agent, task.handoffInput),
       messages,
@@ -470,7 +511,10 @@ export class AgentEngine {
       cachedTokens: response.usage.cachedInputTokens,
       costUsd: cost,
       latencyMs,
+      attempt: ctx.attempt,
     });
+    // The ledger row no longer counts as unaccounted: its cost is now on the run.
+    await store.markModelCallRecorded(orgId, attemptId);
     this.opts.logger?.info?.(
       {
         event: "model_call",
@@ -518,8 +562,13 @@ export class AgentEngine {
     return response;
   }
 
-  private checkRunLimits(agent: AgentConfig, run: RunRecord) {
+  /**
+   * Backstop after a call. The pre-call reservation normally prevents overspend; this
+   * catches the cases it cannot bound exactly (input-token estimate, unpriced models).
+   */
+  private async checkRunLimits(task: TaskRecord, agent: AgentConfig, run: RunRecord) {
     if (run.costUsd > agent.maxRunCostUsd) {
+      await this.emitBudgetExceeded(task, run, { scope: "run", phase: "after_call", limitUsd: agent.maxRunCostUsd, spentUsd: run.costUsd });
       throw new RunStop({
         status: "failed",
         failureCode: "budget_exceeded",
@@ -531,29 +580,107 @@ export class AgentEngine {
     }
   }
 
-  /** Per-task spending limit, summed over every run in the task tree (pipeline steps included). */
-  private async checkTreeBudget(task: TaskRecord) {
+  private async emitBudgetExceeded(task: TaskRecord, run: RunRecord, payload: Record<string, unknown>) {
+    budgetStats.exceeded++;
+    this.opts.logger?.warn?.({ event: "budget_exceeded", taskId: task.id, runId: run.id, ...payload }, "spending limit reached");
+    await this.emit(task, run, "budget.exceeded", { ...payload, costIsEstimate: true });
+  }
+
+  /** The org's key for this provider; maps credential failures to a clear, non-secret run failure. */
+  private async resolveKey(orgId: string, provider: ModelProvider): Promise<string | null> {
+    try {
+      return await this.opts.credentials!.resolve(orgId, provider.id);
+    } catch (err) {
+      // KMS unreachable or throttling: let the durable layer retry the step.
+      if ((err as { retryable?: boolean } | null)?.retryable === true) throw err;
+      const code = (err as { code?: string } | null)?.code ?? "CREDENTIAL_ERROR";
+      throw new RunStop(
+        {
+          status: "failed",
+          failureCode: "credential_unavailable",
+          message: `The organization's ${provider.id} credential could not be decrypted (${code}). An owner should check key management or re-enter the key in Settings.`,
+        },
+        { code, provider: provider.id },
+      );
+    }
+  }
+
+  /**
+   * Reserve a conservative maximum cost for one request against the run and task-tree
+   * limits, before the request is sent. Also detects requests for the same turn that an
+   * earlier attempt left open (its worker died after sending), which may have been billed.
+   */
+  private async reserve(task: TaskRecord, agent: AgentConfig, run: RunRecord, ctx: StepContext, turn: number, req: Parameters<ModelProvider["generate"]>[0]) {
     const root = task.parentTaskId ? await this.opts.store.getTask(task.organizationId, task.parentTaskId) : task;
-    const limit = root?.maxCostUsd ?? null;
-    if (limit === null || limit === undefined || !root) return;
-    const spent = await this.opts.store.getTreeSpend(task.organizationId, root.id);
-    if (spent >= limit) {
+    const rootTaskId = root?.id ?? task.id;
+    const est = estimateMaxRequestCost(this.opts.providers.catalog, agent.provider, agent.model, req, this.opts.unpricedCallReserveUsd ?? 0);
+    const r = await this.opts.store.reserveModelCall(task.organizationId, {
+      rootTaskId,
+      taskId: task.id,
+      runId: run.id,
+      turn,
+      activityAttempt: ctx.attempt ?? null,
+      provider: agent.provider,
+      model: agent.model,
+      reservedUsd: est.usd,
+      treeLimitUsd: root?.maxCostUsd ?? null,
+      runLimitUsd: agent.maxRunCostUsd,
+    });
+    for (const o of r.orphaned) {
+      budgetStats.possibleDuplicates++;
+      this.opts.logger?.warn?.(
+        { event: "possible_duplicate_billing", taskId: task.id, runId: run.id, turn, orphanedAttemptId: o.id, reservedUsd: o.reservedUsd, activityAttempt: o.activityAttempt },
+        "an earlier request for this turn never settled; the provider may have billed it",
+      );
+      await this.emit(task, run, "billing.possible_duplicate", {
+        turn,
+        attemptId: o.id,
+        sequence: o.sequence,
+        reason: "unsettled_request",
+        countedUsd: o.reservedUsd,
+        note: "A worker stopped after sending this request. The provider may have charged for it; it is counted at its reserved maximum.",
+      });
+    }
+    if (r.ok && r.lostReplies > 0) {
+      budgetStats.possibleDuplicates++;
+      await this.emit(task, run, "billing.possible_duplicate", {
+        turn,
+        reason: "reply_not_stored",
+        lostReplies: r.lostReplies,
+        note: "A reply for this turn arrived but was not stored before the worker stopped, so the turn is requested again. The earlier reply was billed.",
+      });
+    }
+    if (!r.ok) {
+      const spent = r.scope === "task" ? r.tree : r.run;
+      await this.emitBudgetExceeded(task, run, {
+        scope: r.scope,
+        phase: "before_call",
+        limitUsd: r.limitUsd,
+        recordedUsd: round6(spent.recordedUsd),
+        unaccountedUsd: round6(spent.unaccountedUsd),
+        requestReserveUsd: est.usd,
+        priced: est.priced,
+      });
+      const what = r.scope === "task" ? "the task limit" : "the agent budget";
       throw new RunStop({
         status: "failed",
         failureCode: "budget_exceeded",
-        message: `Task spending $${spent.toFixed(4)} reached the task limit of $${limit.toFixed(4)}`,
+        message: `The next model call could cost up to $${est.usd.toFixed(4)}; with $${(spent.recordedUsd + spent.unaccountedUsd).toFixed(4)} already spent or reserved that would exceed ${what} of $${r.limitUsd.toFixed(4)}`,
       });
     }
+    return { attemptId: r.attemptId, est };
   }
 
   private async callModel(
     task: TaskRecord,
+    agent: AgentConfig,
     run: RunRecord,
     provider: ModelProvider,
     ctx: StepContext,
     apiKey: string | undefined,
+    turn: number,
     req: Parameters<ModelProvider["generate"]>[0],
-  ): Promise<ModelResponse> {
+  ): Promise<{ response: ModelResponse; attemptId: string }> {
     const retries = this.opts.providerRetries ?? 2;
     const base = this.opts.retryBaseDelayMs ?? 500;
     const cap = this.opts.retryMaxDelayMs ?? 8_000;
@@ -561,10 +688,13 @@ export class AgentEngine {
     const random = this.opts.random ?? Math.random;
     const signal = ctx.signal;
     for (let attempt = 0; ; attempt++) {
+      // Every provider request (including the engine's own retries) is reserved first.
+      const { attemptId } = await this.reserve(task, agent, run, ctx, turn, req);
       const started = Date.now();
+      let response: ModelResponse;
       try {
         ctx.heartbeat?.({ phase: "model", attempt });
-        return await provider.generate(req, {
+        response = await provider.generate(req, {
           signal,
           timeoutMs: this.opts.providerTimeoutMs ?? 120_000,
           ...(apiKey ? { apiKey } : {}),
@@ -581,10 +711,16 @@ export class AgentEngine {
           },
         });
       } catch (err) {
+        const pe = err instanceof ProviderError ? err : null;
+        const kind = signal.aborted ? "aborted" : (pe?.kind ?? "unknown");
+        await this.opts.store.settleModelCall(task.organizationId, attemptId, {
+          status: "failed",
+          billingUnknown: POSSIBLY_BILLED_KINDS.has(kind),
+          error: pe ? pe.code : "PROVIDER_UNKNOWN",
+        });
         if (signal.aborted || (err instanceof ProviderError && err.kind === "aborted")) {
           throw new RunStop({ status: "cancelled" });
         }
-        const pe = err instanceof ProviderError ? err : null;
         const detail = pe ? pe.toJSON() : { code: "PROVIDER_UNKNOWN", provider: provider.id };
         const log = { event: "model_call_failed", taskId: task.id, runId: run.id, model: req.model, attempt, latencyMs: Date.now() - started, ...detail };
         const retryAfter = pe?.retryAfterMs;
@@ -603,6 +739,15 @@ export class AgentEngine {
         const suffix = pe?.retryable && attempt > 0 ? ` (after ${attempt + 1} attempts)` : "";
         throw new RunStop({ status: "failed", failureCode, message: `${pe ? pe.message : "Unexpected provider error"}${suffix}` }, detail);
       }
+      // Settle with the estimated cost of the reported usage before anything else is persisted:
+      // if the worker dies before the turn is stored, the next attempt sees a reply that was billed.
+      await this.opts.store.settleModelCall(task.organizationId, attemptId, {
+        status: "succeeded",
+        actualUsd: this.opts.providers.catalog.cost(agent.provider, agent.model, response.usage),
+        inputTokens: response.usage.inputTokens,
+        outputTokens: response.usage.outputTokens,
+      });
+      return { response, attemptId };
     }
   }
 

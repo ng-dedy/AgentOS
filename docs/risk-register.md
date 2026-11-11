@@ -11,3 +11,14 @@
 | R7 | Pricing data goes stale | High | Low | Catalog is data and overridable by env | Cost figures are estimates; marked so in UI |
 | R8 | Fast-moving dependency majors (Next 16, Prisma 7, Zod 4) | Medium | Medium | Exact versions pinned via lockfile | Upgrade work later |
 | R9 | Cross-tenant data leakage | Low | Critical | Org id required by every repository function; isolation integration tests | Postgres RLS would be defence in depth (later) |
+
+## Milestone 2C updates
+
+| # | Risk | Status after 2C | Residual |
+|---|---|---|---|
+| R3 | Runaway cost | Pre-call reservation per request, per-run and per-tree limits, attempt ledger | Costs are estimates (token counts × static prices); a provider may bill a request whose reply is lost, which is flagged, not prevented |
+| R5 | Events missed across instances | Commit-safe xid8 watermark cursor plus periodic reconciliation, verified with two instances | At-least-once: clients must drop repeats by seq |
+| R10 | Production key management | AWS KMS adapter with encryption context, startup refuses dev KMS | Verified only against moto and a fake client, not real AWS |
+| R11 | Unsafe production configuration | Startup validation in API, worker and scripts | Rules cover known pitfalls only; review on each new setting |
+| R12 | Workflow code change breaks running histories | Replay test against exported 2B histories, Worker Deployment versioning | Version promotion and draining not exercised on a real cluster |
+| R13 | Temporal Cloud / mTLS differences | TLS and mTLS verified through a local proxy | Temporal Cloud and real certificates unverified |

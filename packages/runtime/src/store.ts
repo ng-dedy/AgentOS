@@ -113,7 +113,7 @@ export interface NewEvent {
  * Persistence port for the runtime. Every method is organization-scoped; an
  * implementation must never return rows belonging to another organization.
  */
-export interface RunStore {
+export interface RunStore extends ModelCallLedger {
   getTask(orgId: string, taskId: string): Promise<TaskRecord | null>;
   updateTask(
     orgId: string,
@@ -193,6 +193,56 @@ export interface RunStore {
     orgId: string,
     input: { runId: string; agentId: string; provider: string; model: string; inputTokens: number; outputTokens: number; cachedTokens: number; costUsd: number; latencyMs?: number; attempt?: number },
   ): Promise<void>;
+}
+
+/** A provider request left `reserved` by an attempt that never settled (its worker died). */
+export interface OrphanedAttempt {
+  id: string;
+  turn: number;
+  sequence: number;
+  reservedUsd: number;
+  activityAttempt: number | null;
+}
+
+export interface ReserveModelCallInput {
+  rootTaskId: string;
+  taskId: string;
+  runId: string;
+  turn: number;
+  activityAttempt: number | null;
+  provider: string;
+  model: string;
+  reservedUsd: number;
+  /** Task-tree limit (root task's maxCostUsd) and the agent's per-run limit, in USD. */
+  treeLimitUsd: number | null;
+  runLimitUsd: number | null;
+}
+
+/** Spend as the ledger sees it: recorded usage plus requests that are open or may have been billed. */
+export interface SpendSnapshot {
+  /** Recorded (stored) usage, as on the runs. */
+  recordedUsd: number;
+  /** Open reservations, orphaned reservations, failed requests with unknown billing, lost replies. */
+  unaccountedUsd: number;
+}
+
+export type ReserveModelCallResult =
+  | { ok: true; attemptId: string; sequence: number; orphaned: OrphanedAttempt[]; lostReplies: number; tree: SpendSnapshot; run: SpendSnapshot }
+  | { ok: false; scope: "task" | "run"; limitUsd: number; tree: SpendSnapshot; run: SpendSnapshot; reservedUsd: number; orphaned: OrphanedAttempt[] };
+
+/**
+ * Attempt-level ledger of provider requests (pre-call reservations). Implementations must
+ * serialize `reserveModelCall` per task tree so two concurrent requests cannot both pass a limit.
+ */
+export interface ModelCallLedger {
+  reserveModelCall(orgId: string, input: ReserveModelCallInput): Promise<ReserveModelCallResult>;
+  settleModelCall(
+    orgId: string,
+    attemptId: string,
+    patch: { status: "succeeded" | "failed"; actualUsd?: number; inputTokens?: number; outputTokens?: number; billingUnknown?: boolean; error?: string },
+  ): Promise<void>;
+  /** The reply was stored and its usage recorded on the run. */
+  markModelCallRecorded(orgId: string, attemptId: string): Promise<void>;
 }
 
 /** Event output port. `emit` persists then publishes; `emitTransient` publishes only. */

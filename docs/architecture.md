@@ -172,10 +172,12 @@ cancels the active child. `WorkflowEngine` (`start`, `cancel`,
 
 * `GET /api/v1/tasks/:id/events` — SSE for one task (and its child tasks).
 * `GET /api/v1/events` — SSE for the whole organization (dashboard feed).
-* Each persisted event has a global monotonically increasing `seq` used as the
-  SSE `id`. On (re)connect the server subscribes to the live bus first, then
-  replays rows with `seq > Last-Event-ID` (header or `?after=` query), then
-  flushes live events, de-duplicating by `seq`. Heartbeat comments every 15s.
+* Each persisted event has a global `seq` and the id of the transaction that
+  wrote it. The SSE `id` is `<watermark>.<seq>`, where the watermark is a
+  Postgres snapshot xmin; replay returns rows with `txid >= watermark`, so an
+  event that commits late is never skipped (Milestone 2C, see
+  `docs/durable-execution.md`). Delivery is at-least-once, de-duplicated by
+  `seq`. Heartbeat comments every 15s.
 * Token deltas (`model.delta`) are live-only and carry no id; the full text of
   each model turn is persisted as `model.output`. After a reload, the UI shows
   everything except the partial text of an in-flight model call.
@@ -197,3 +199,12 @@ Temporal workers, OAuth/OIDC sign-in, encrypted per-org provider credentials
 (KMS), RAG/retrieval, artifacts beyond text, parallel/conditional workflows,
 autonomous delegation, horizontal scaling of the SSE bus (Postgres
 LISTEN/NOTIFY or Redis), billing.
+
+## Milestone 2C: production hardening
+
+* **Configuration gate.** `validateProductionConfig` (`packages/platform/src/productionConfig.ts`) runs before the API, the worker and scripts start when `AGENTOS_ENV=production` or `NODE_ENV=production`, and refuses to start listing every problem: in-process engine, development KMS, mock provider, plaintext or localhost Temporal, insecure cookies, a non-https web origin, a short metrics token.
+* **Keys.** AWS KMS envelope encryption with an organization-bound encryption context (`docs/credentials.md`).
+* **Execution.** Temporal only in production, with TLS/mTLS or API key, timeouts, Worker Deployment versioning and graceful drain (`docs/durable-execution.md`).
+* **Events.** Commit-safe watermark cursor and periodic reconciliation.
+* **Cost.** Pre-call reservations in `ModelCallAttempt` with per-run and per-tree limits and possible-duplicate detection.
+* **Operations.** `/livez`, `/readyz`, `/metrics` (Prometheus, bearer token) on the API and workers; drain on SIGTERM. Runbook, backup and recovery, incident response and migration rules are in `docs/deployment-runbook.md` and `docs/operations/`.

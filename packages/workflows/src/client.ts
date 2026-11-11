@@ -2,12 +2,15 @@ import { Client, Connection, WorkflowNotFoundError, type WorkflowHandle } from "
 import { WorkflowExecutionAlreadyStartedError, WorkflowIdReusePolicy } from "@temporalio/common";
 import { TERMINAL_TASK_STATUSES } from "@agentos/contracts";
 import type { RunStore, WorkflowDescription, WorkflowEngine } from "@agentos/runtime";
+import { connectWithRetry, type TemporalConnectionConfig } from "./connection";
 import { workflowIdFor, type WorkflowInput, type WorkflowOptions } from "./types";
 
 export interface TemporalEngineOptions {
-  address: string;
-  namespace: string;
+  /** Address, namespace, TLS / mTLS / API key, connect timeout and attempts. */
+  connection: TemporalConnectionConfig;
   taskQueue: string;
+  /** Hard cap for one workflow run (Temporal `workflowRunTimeout`). 0/undefined = none. */
+  workflowRunTimeoutMs?: number;
   store: RunStore;
   /** Persist the execution id on the task. */
   recordWorkflowId: (orgId: string, taskId: string, workflowId: string) => Promise<void>;
@@ -31,10 +34,21 @@ export class TemporalWorkflowEngine implements WorkflowEngine {
     private readonly opts: TemporalEngineOptions,
   ) {}
 
+  /** Connect with bounded retries; throws `TemporalConnectionError` with a clear message. */
   static async connect(opts: TemporalEngineOptions): Promise<TemporalWorkflowEngine> {
-    const connection = await Connection.connect({ address: opts.address });
-    const client = new Client({ connection, namespace: opts.namespace });
+    const c = opts.connection;
+    const connection = await connectWithRetry("API", c, (o) => Connection.connect({ ...o, connectTimeout: c.connectTimeoutMs ?? 10_000 }), opts.logger);
+    const client = new Client({ connection, namespace: c.namespace });
     return new TemporalWorkflowEngine(connection, client, opts);
+  }
+
+  get namespace(): string {
+    return this.opts.connection.namespace;
+  }
+
+  /** Cheap reachability probe for readiness checks (frontend health RPC, bounded by `timeoutMs`). */
+  async ping(timeoutMs = 3_000): Promise<void> {
+    await this.connection.withDeadline(Date.now() + timeoutMs, () => this.connection.healthService.check({}));
   }
 
   /**
@@ -53,6 +67,7 @@ export class TemporalWorkflowEngine implements WorkflowEngine {
         args: [this.input(orgId, taskId)],
         workflowIdReusePolicy: WorkflowIdReusePolicy.ALLOW_DUPLICATE_FAILED_ONLY,
         memo: { orgId },
+        ...(this.opts.workflowRunTimeoutMs ? { workflowRunTimeout: this.opts.workflowRunTimeoutMs } : {}),
       });
     } catch (err) {
       if (!(err instanceof WorkflowExecutionAlreadyStartedError)) throw err;
@@ -149,7 +164,7 @@ export class TemporalWorkflowEngine implements WorkflowEngine {
   async hasPollers(): Promise<{ workflowPollers: number; activityPollers: number }> {
     const svc = this.connection.workflowService;
     const q = async (taskQueueType: 1 | 2) =>
-      (await svc.describeTaskQueue({ namespace: this.opts.namespace, taskQueue: { name: this.opts.taskQueue }, taskQueueType })).pollers?.length ?? 0;
+      (await svc.describeTaskQueue({ namespace: this.opts.connection.namespace, taskQueue: { name: this.opts.taskQueue }, taskQueueType })).pollers?.length ?? 0;
     return { workflowPollers: await q(1), activityPollers: await q(2) };
   }
 

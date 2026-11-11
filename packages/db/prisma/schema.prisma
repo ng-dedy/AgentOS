@@ -34,6 +34,7 @@ model Organization {
   auditLogs     AuditLog[]
   idempotency   IdempotencyKey[]
   credentials   ProviderCredential[]
+  modelCalls    ModelCallAttempt[]
 }
 
 model User {
@@ -243,11 +244,56 @@ model RunEvent {
   type           String
   payload        Json
   createdAt      DateTime @default(now())
+  /// Id of the inserting transaction (pg_current_xact_id()). Commit-safe event cursor; see packages/platform/src/events/cursor.ts.
+  /// Null only for rows written before milestone 2C, which are all older than any watermark.
+  txid           Unsupported("xid8")? @default(dbgenerated("pg_current_xact_id()"))
 
   organization Organization @relation(fields: [organizationId], references: [id], onDelete: Cascade)
 
   @@index([rootTaskId, seq])
   @@index([organizationId, seq])
+  @@index([txid])
+}
+
+/// One provider request, reserved before it is sent and settled after (milestone 2C).
+/// The ledger makes spending limits hold before a call and shows calls that may have been
+/// billed without a stored result (worker crash between the reply and persisting it).
+model ModelCallAttempt {
+  id              String    @id @default(cuid())
+  organizationId  String
+  rootTaskId      String
+  taskId          String
+  runId           String
+  /// Model turn within the run (0-based) and the request number for that turn (1, 2, ...).
+  turn            Int
+  sequence        Int
+  /// Temporal activity attempt that made the request (1 = first); null in-process.
+  activityAttempt Int?
+  provider        String
+  model           String
+  /// reserved -> succeeded | failed; reserved rows found by a later attempt become orphaned.
+  status          String
+  /// Conservative maximum cost held against the limits while the request is open.
+  reservedUsd     Decimal   @db.Decimal(12, 6)
+  /// Estimated cost from reported usage (catalog prices); null until it succeeds.
+  actualUsd       Decimal?  @db.Decimal(12, 6)
+  inputTokens     Int?
+  outputTokens    Int?
+  /// The successful reply was stored and its usage recorded on the run.
+  recorded        Boolean   @default(false)
+  /// The request failed in a way the provider may still have charged for (timeout, dropped connection).
+  billingUnknown  Boolean   @default(false)
+  /// An earlier request for the same turn may have been billed without its result being kept.
+  possibleDuplicate Boolean @default(false)
+  error           String?
+  createdAt       DateTime  @default(now())
+  settledAt       DateTime?
+
+  organization Organization @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+
+  @@unique([runId, turn, sequence])
+  @@index([rootTaskId, status])
+  @@index([organizationId, createdAt])
 }
 
 model ToolCall {

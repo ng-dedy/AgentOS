@@ -1,0 +1,12 @@
+{
+  "Version": "2012-10-17",
+  "Statement": [
+    {
+      "Sid": "AgentOSCredentialKey",
+      "Effect": "Allow",
+      "Action": ["kms:GenerateDataKey", "kms:Encrypt", "kms:Decrypt"],
+      "Resource": "arn:aws:kms:REGION:ACCOUNT_ID:key/KEY_ID",
+      "Condition": { "StringEquals": { "kms:EncryptionContext:scheme": "agentos-envelope-v1" } }
+    }
+  ]
+}

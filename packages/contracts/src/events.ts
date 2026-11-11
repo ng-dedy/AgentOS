@@ -19,6 +19,10 @@ export const RunEventTypeSchema = z.enum([
   "run.completed",
   "run.failed",
   "run.cancelled",
+  /** A spending limit stopped the run (before a call: reservation; after: backstop). Costs are estimates. */
+  "budget.exceeded",
+  /** A provider request may have been billed without its result being kept (worker crash window). */
+  "billing.possible_duplicate",
 ]);
 export type RunEventType = z.infer<typeof RunEventTypeSchema>;
 
